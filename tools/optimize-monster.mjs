@@ -3,11 +3,13 @@
 //   2. welds and simplifies it to roughly 12% of the triangles,
 //   3. bakes node transforms into world space and swings the T-posed arms down to hang
 //      by its sides (the source has no skeleton, so this is a one-off vertex bend),
-//   4. regenerates smooth normals, resizes textures to 1024 px WebP, and quantizes.
+//   4. stores a per-vertex arm weight (_ARM: -1 one arm, +1 the other, 0 body) and the
+//      shoulder pivot (scene extras.armPivot) so the game can swing the arms in a shader,
+//   5. regenerates smooth normals, resizes textures to 1024 px WebP, and quantizes.
 //
 // Usage (needs @gltf-transform/{core,extensions,functions}, meshoptimizer and sharp):
 //   node tools/optimize-monster.mjs assets/source/wendigo-original.glb assets/monster.glb
-import { NodeIO } from '@gltf-transform/core';
+import { NodeIO, Accessor } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import { weld, simplify, normals, dedup, prune, quantize, textureCompress, join, flatten, clearNodeTransform } from '@gltf-transform/functions';
 import { MeshoptSimplifier } from 'meshoptimizer';
@@ -51,13 +53,24 @@ const px = torso * 0.9, py = armY, blend = H * 0.07;
 const theta = (72 * Math.PI) / 180;       // how far the arms swing down
 const reach = (14 * Math.PI) / 180;       // and a little forward (+Z, the model's front)
 const smooth = (t) => t * t * (3 - 2 * t);
+// Shoulder depth: mean Z of the torso at shoulder height.
+let pzSum = 0, pzN = 0;
 for (const p of prims) {
   const a = p.getAttribute('POSITION'), v = [0, 0, 0];
+  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); if (Math.abs(v[0]) < px && Math.abs(v[1] - py) < H * 0.03) { pzSum += v[2]; pzN++; } }
+}
+const pz = pzN ? pzSum / pzN : 0;
+const buffer = root.listBuffers()[0];
+for (const p of prims) {
+  const a = p.getAttribute('POSITION'), v = [0, 0, 0];
+  const arm = new Float32Array(a.getCount());
+  p.setAttribute('_ARM', doc.createAccessor().setType(Accessor.Type.SCALAR).setArray(arm).setBuffer(buffer));
   for (let i = 0; i < a.getCount(); i++) {
     a.getElement(i, v);
     const s = Math.sign(v[0]), u = Math.abs(v[0]) - px;
     if (u <= 0 || v[1] < py - H * 0.25) continue; // only the arms, never the legs
     const k = smooth(Math.min(1, u / blend));
+    arm[i] = s * k;
     const t = theta * k, w = v[1] - py;
     const u2 = u * Math.cos(t) + w * Math.sin(t);
     const w2 = -u * Math.sin(t) + w * Math.cos(t);
@@ -65,14 +78,16 @@ for (const p of prims) {
     a.setElement(i, v);
   }
 }
-console.log({ H: +H.toFixed(2), armY: +armY.toFixed(2), torso: +torso.toFixed(2), span: +(maxX * 2).toFixed(2) });
+root.listScenes()[0].setExtras({ armPivot: [0, py, pz] });
+console.log({ H: +H.toFixed(2), armY: +armY.toFixed(2), torso: +torso.toFixed(2), span: +(maxX * 2).toFixed(2), pz: +pz.toFixed(3) });
 
 await doc.transform(
   normals({ overwrite: true }),
   weld(),
   prune(),
   textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024] }),
-  quantize(),
+  // Positions stay float so the vertex space matches extras.armPivot (no dequantize transform).
+  quantize({ pattern: /^(NORMAL|TEXCOORD_\d+)$/ }),
 );
 await io.write(out, doc);
 let verts = 0; for (const p of root.listMeshes().flatMap((m) => m.listPrimitives())) verts += p.getAttribute('POSITION').getCount();

@@ -24,12 +24,16 @@ python3 -m http.server 8000
 
 **Looking around:** click the game to lock the mouse cursor. If the browser won't allow pointer lock, or on a touch screen, drag across the screen to look instead. Touch is only for looking; movement and actions always come from the keyboard.
 
+**Camouflage:** a monster that stands still fades into a faint, dithered shimmer for survivors. Its HUD shows when it is hidden.
+
+**Kills:** the monster rears up and slams its claws down, and the survivor falls backward. A survivor who is taken sees it in first person: they're turned to face the monster, then collapse to the floor. The match result waits until the final kill has played out.
+
 Caught or escaped survivors become free-flying spectators and can press **V** to switch to monster vision.
 
 ### Playing against bots
 **Play vs bot** starts an offline match straight away:
 - **Play as survivor**: a bot monster hunts you. It's blind too. It hears you within a radius set by your noise (sprinting ≈ 24 m, walking ≈ 12 m, crouching ≈ 3.6 m), investigates what it heard, and shrieks to reveal you when it loses the trail.
-- **Play as monster**: two bot survivors sneak between generators, crouch when you're near, sprint away when you get close, and run for the exit once the gate opens.
+- **Play as monster**: two bot survivors split up to repair generators and run for the exit once the gate opens. When they notice you, they freeze silently, then crouch-sneak away. They only sprint if you're right on top of them or they've been hit. A moving monster is noticed from 14 m away, a still (camouflaged) one only within 4.5 m.
 
 **Custom offline lobby** lets you mix any number of bot survivors with a human or bot monster.
 
@@ -67,7 +71,8 @@ Peer-to-peer connections need STUN to get through NAT. Some strict networks also
 Notes:
 - **Survivor file:** as uploaded, it is truncated (its ambient-occlusion texture runs past the end of the file), so the reference to that texture was removed.
 - **Survivor material:** it uses the spec-gloss material extension, which three.js no longer reads, so the game re-applies its diffuse texture in code.
-- **Monster animation:** the wendigo has no skeleton, so its gait (hunch, sway, bob) is procedural.
+- **Monster animation:** the wendigo has no skeleton. The optimizer bakes a per-vertex arm weight (`_ARM`) and the shoulder pivot (`extras.armPivot`), and a vertex-shader hook swings the arms around the shoulder axis. That drives the walk swing, claw swipes and the kill slam, in both the normal and sonar views and in shadows. The body's hunch, sway, lunge and bob are procedural.
+- **Survivor animation:** the walk/idle clips are blended by speed. Crouch, sprint lean, repairing, hit flinch and the death fall are layered on top as procedural bone rotations.
 
 ## Playtest build (Claude artifact)
 `play.html` is an embeddable copy of the page used to publish a playtest build as a Claude artifact. Regenerate it after editing `index.html`:

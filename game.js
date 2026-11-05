@@ -198,17 +198,52 @@ const sonarShared = {
   uRip: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector4(0, 0, 0, -999)) },  // xyz origin, w start time
   uRipP: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector3(0, 0, 1)) },       // x maxRadius, y strength, z speed
 };
+// The wendigo has no skeleton. Its optimizer bakes a per-vertex arm weight (_arm: -1 one
+// arm, +1 the other) and the shoulder pivot, so the arms swing around the shoulder axis
+// in the vertex shader. Angles (uArms) are radians; positive swings the arm forward/up.
+const ARM_BEND_PARS = /* glsl */ `
+  attribute float _arm;
+  uniform vec2 uArms;
+  uniform vec3 uArmPivot;
+  mat3 armRot() {
+    float a = -(_arm < 0.0 ? uArms.x : uArms.y) * abs(_arm);
+    float c = cos(a), s = sin(a);
+    return mat3(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c);
+  }`;
+const ARM_BEND_NORMAL = `objectNormal = armRot() * objectNormal;`;
+const ARM_BEND_POS = `transformed = armRot() * (transformed - uArmPivot) + uArmPivot;`;
+function hookArmBend(material, U) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uArms = U.uArms; shader.uniforms.uArmPivot = U.uArmPivot;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\n' + ARM_BEND_PARS)
+      .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\n' + ARM_BEND_NORMAL)
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + ARM_BEND_POS);
+  };
+  material.customProgramCacheKey = () => 'arm-bend';
+  return material;
+}
+
 // Skinning chunks let animated (SkinnedMesh) characters deform in monster vision too.
 const SONAR_VERT = /* glsl */ `
   #include <common>
   #include <skinning_pars_vertex>
+  #ifdef MONSTER_BEND
+  ${ARM_BEND_PARS}
+  #endif
   varying vec3 vWorld;
   varying vec3 vNormalW;
   void main() {
     #include <beginnormal_vertex>
+    #ifdef MONSTER_BEND
+    ${ARM_BEND_NORMAL}
+    #endif
     #include <skinbase_vertex>
     #include <skinnormal_vertex>
     #include <begin_vertex>
+    #ifdef MONSTER_BEND
+    ${ARM_BEND_POS}
+    #endif
     #include <skinning_vertex>
     vec4 wp = modelMatrix * vec4(transformed, 1.0);
     vWorld = wp.xyz;
@@ -271,17 +306,18 @@ const SONAR_FRAG = /* glsl */ `
     vec3 col = uColor * (lines * I * 1.8 + I * 0.025 + fres * I * 0.22);
     gl_FragColor = vec4(col, 1.0);
   }`;
-function makeSonarMaterial({ base, gain, grid, near, color }) {
+function makeSonarMaterial({ base, gain, grid, near, color, bend = null }) {
   return new THREE.ShaderMaterial({
-    defines: { MAXR: CFG.MAX_RIPPLES },
+    defines: bend ? { MAXR: CFG.MAX_RIPPLES, MONSTER_BEND: 1 } : { MAXR: CFG.MAX_RIPPLES },
     uniforms: Object.assign({}, sonarShared, {
       uBase: { value: base }, uGain: { value: gain }, uGrid: { value: grid },
       uNearGain: { value: near }, uColor: { value: new THREE.Color(color) },
-    }),
+    }, bend ? { uArms: bend.uArms, uArmPivot: bend.uArmPivot } : {}),
     vertexShader: SONAR_VERT,
     fragmentShader: SONAR_FRAG,
   });
 }
+const ENTITY_SONAR = { base: 0.0, gain: 2.6, grid: 0.2, near: 0.35, color: 0x9bffc4 };
 const SONAR_MATS = {
   env: makeSonarMaterial({ base: 0.05, gain: 1.0, grid: 1.0, near: 0.22, color: 0x2bff7a }),
   gen: makeSonarMaterial({ base: 0.35, gain: 1.0, grid: 0.25, near: 0.3, color: 0xb4ff3b }),   // objectives faintly visible
@@ -636,13 +672,15 @@ async function prepSurvivorAsset(gltf) {
   return { template, walk, idle };
 }
 function prepMonsterAsset(gltf) {
+  const pv = gltf.scene.userData.armPivot || [0, 0, 0];
+  const pivot = new THREE.Vector3(pv[0], pv[1], pv[2]);
   gltf.scene.traverse((o) => {
     if (!o.isMesh) return;
     o.castShadow = true;
     o.material.side = THREE.FrontSide;
     if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
   });
-  return { template: normalizeModel(gltf.scene, 2.7, Math.PI) };
+  return { template: normalizeModel(gltf.scene, 2.7, Math.PI), pivot };
 }
 async function loadAssets(onProgress) {
   const prog = { s: 0, m: 0 };
@@ -670,6 +708,14 @@ function makeSurvivorAvatar(name, colorIdx) {
       acts.walk.play(); acts.idle.play(); acts.walk.setEffectiveWeight(0); acts.idle.time = Math.random() * 1.5;
     }
     g.userData.mixer = mixer; g.userData.acts = acts;
+    const bones = {}; model.traverse((o) => { if (o.isBone) bones[o.name] = o; });
+    const find = (re) => bones[Object.keys(bones).find((n) => re.test(n))];
+    g.userData.bones = {
+      spine: find(/Spine_/), spine2: find(/Spine2_/), neck: find(/Neck_/),
+      lArm: find(/LeftArm_/), rArm: find(/RightArm_/), lFore: find(/LeftForeArm_/), rFore: find(/RightForeArm_/),
+      lUp: find(/LeftUpLeg_/), rUp: find(/RightUpLeg_/), lLeg: find(/LeftLeg_/), rLeg: find(/RightLeg_/),
+      lFoot: find(/LeftFoot_/), rFoot: find(/RightFoot_/),
+    };
     reg(g, 'entity');
     const label = makeLabel(name); label.position.y = 2.05; g.add(label);
     g.userData.rig = rig;
@@ -694,8 +740,21 @@ function makeMonsterAvatar() {
   const g = new THREE.Group();
   const rig = new THREE.Group(); g.add(rig);
   if (ASSETS.monster) {
-    rig.add(ASSETS.monster.template.clone(true));
+    const U = { uArms: { value: new THREE.Vector2() }, uArmPivot: { value: ASSETS.monster.pivot.clone() } };
+    const model = ASSETS.monster.template.clone(true);
+    const mats = [], meshes = [];
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      // alphaHash gives a dithered fade for the camouflage without transparency sorting.
+      const m = hookArmBend(o.material.clone(), U); m.alphaHash = true;
+      o.material = m; mats.push(m); meshes.push(o);
+      o.customDepthMaterial = hookArmBend(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }), U);
+    });
+    rig.add(model);
     reg(g, 'entity');
+    const sonar = makeSonarMaterial({ ...ENTITY_SONAR, bend: U });
+    for (const e of swappables) if (meshes.includes(e.mesh)) { e.m = sonar; if (viewMode === 'monster') e.mesh.material = sonar; }
+    g.userData.monster = { U, mats, meshes, camo: 0, stillT: 0, swing: 0, swingSide: 1, kill: -1 };
     g.userData.rig = rig;
     scene.add(g);
     return g;
@@ -932,6 +991,7 @@ function hostAttack(m, ry) {
   if (!m || !m.isMonster || hs.phase !== 'playing') return;
   if (time - m.lastAttack < CFG.ATTACK_CD * 0.9) return;
   m.lastAttack = time;
+  broadcast({ t: 'event', k: 'swing', by: m.id });
   const fx = -Math.sin(ry), fz = -Math.cos(ry);
   let best = null, bestD = Infinity;
   for (const s of Object.values(hs.players)) {
@@ -943,8 +1003,8 @@ function hostAttack(m, ry) {
   }
   if (!best || time - best.lastHit < CFG.HIT_INVULN) return;
   best.lastHit = time; best.hp -= 1;
-  if (best.hp <= 0) best.s = 'caught';
-  broadcast({ t: 'event', k: 'hit', id: best.id, name: best.name, hp: best.hp, x: best.x, z: best.z });
+  if (best.hp <= 0) { best.s = 'caught'; hs.lastKill = time; }
+  broadcast({ t: 'event', k: 'hit', id: best.id, by: m.id, name: best.name, hp: best.hp, x: best.x, z: best.z });
 }
 function hostRepair(p, gi, dt) {
   if (!p || p.isMonster || p.s !== 'alive' || hs.phase !== 'playing') return;
@@ -976,13 +1036,17 @@ function hostStart() {
     p.x = c.x + (off % 2) * 1.6; p.z = c.z + Math.floor(off / 2) * 1.6; p.ry = Math.random() * Math.PI * 2;
     p.bot = p.isBot ? newBrain(p) : null;
   });
-  hs.phase = 'playing'; hs.timeLeft = CFG.DURATION; hs.gateOpen = false;
+  hs.phase = 'playing'; hs.timeLeft = CFG.DURATION; hs.gateOpen = false; hs.lastKill = undefined;
   hs.gens = GEN_TILES.map(() => ({ progress: 0, done: false }));
   broadcast({ t: 'start', duration: CFG.DURATION, players: list.map((p) => ({ id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot, x: p.x, z: p.z, ry: p.ry, colorIdx: p.colorIdx })) });
 }
 function hostUpdate(dt) {
   if (hs.phase !== 'playing') return;
   hs.timeLeft -= dt;
+  for (const p of Object.values(hs.players)) {
+    const v = Math.hypot(p.x - (p.lx ?? p.x), p.z - (p.lz ?? p.z)) / Math.max(dt, 1e-4);
+    p.spd = damp(p.spd || 0, v, 4, dt); p.lx = p.x; p.lz = p.z;
+  }
   for (const p of Object.values(hs.players)) if (p.isBot && p.s === 'alive') updateBot(p, dt);
 
   hs.snapAcc += dt;
@@ -1003,6 +1067,8 @@ function hostUpdate(dt) {
   let end = null;
   if (surv.length > 0 && alive === 0) end = escaped > 0 ? { w: 'survivors', reason: `${escaped} escaped, ${caught} taken.` } : { w: 'monster', reason: 'Every survivor was taken.' };
   else if (hs.timeLeft <= 0) end = alive + escaped > 0 ? { w: 'survivors', reason: `Dawn broke. ${alive + escaped} survived, ${caught} taken.` } : { w: 'monster', reason: 'Nobody made it.' };
+  // Let a final kill animation and kill cam play out before showing the result.
+  if (end && hs.lastKill !== undefined && time - hs.lastKill < 3.2) end = null;
   if (end) {
     hs.phase = 'ended';
     broadcast({ t: 'end', winner: end.w, reason: end.reason, stats: surv.map((p) => ({ name: p.name, s: p.s })) });
@@ -1018,7 +1084,7 @@ const tileOf = (x, z) => ({ x: Math.floor(x / TILE), z: Math.floor(z / TILE) });
 function newBrain(p) {
   return p.isMonster
     ? { path: [], goalKey: '', repathT: 0, mode: 'patrol', target: null, preyId: null, hearT: 0, sonarCD: 10, attackCD: 0, wait: 1, stuckT: 0, lx: p.x, lz: p.z }
-    : { path: [], goalKey: '', repathT: 0, flee: 0, wait: Math.random() * 1.5, stamina: 1, stuckT: 0, lx: p.x, lz: p.z };
+    : { path: [], goalKey: '', repathT: 0, state: 'work', t: 0, alert: 0, refreeze: 0, wait: Math.random() * 1.5, stamina: 1, stuckT: 0, lx: p.x, lz: p.z };
 }
 function botPathTo(p, b, tile, allowExit = false) {
   const key = tile.x + ',' + tile.z;
@@ -1055,37 +1121,61 @@ function walkableNeighbour(t) {
 }
 function updateBot(p, dt) { if (p.isMonster) updateMonsterBot(p, dt); else updateSurvivorBot(p, dt); }
 
+// Pick a reachable tile far from the monster, weighted against long detours.
+function botPathAway(p, b, mon) {
+  let best = null, bestScore = -Infinity;
+  for (let i = 0; i < 16; i++) {
+    const t = randomFloorTile(), c = tileCenter(t.x, t.z);
+    const score = Math.hypot(c.x - mon.x, c.z - mon.z) - Math.hypot(c.x - p.x, c.z - p.z) * 0.35;
+    if (score > bestScore) { bestScore = score; best = t; }
+  }
+  b.goalKey = ''; botPathTo(p, b, best);
+}
 function updateSurvivorBot(p, dt) {
   const b = p.bot;
   p.r = 0;
   const mon = Object.values(hs.players).find((q) => q.isMonster && q.s === 'alive');
   const dm = mon ? Math.hypot(mon.x - p.x, mon.z - p.z) : Infinity;
+  // Survivors spot a moving monster at 14 m; a still (camouflaged) one only within 4.5 m.
+  const seen = mon && (dm < 4.5 || (mon.spd > 0.6 && dm < 14));
+  b.refreeze -= dt; b.alert = seen ? 10 : b.alert - dt;
+  const faceMonster = () => { p.ry = angleDamp(p.ry, Math.atan2(-(mon.x - p.x), -(mon.z - p.z)), 6, dt); };
 
-  // Panic: the monster is close, so sprint to the far side of the map.
-  if (dm < 7 && b.flee <= 0) {
-    b.flee = 4 + Math.random() * 2;
-    let best = null, bestD = -1;
-    for (let i = 0; i < 14; i++) {
-      const t = randomFloorTile(), c = tileCenter(t.x, t.z);
-      const score = Math.hypot(c.x - mon.x, c.z - mon.z) - Math.hypot(c.x - p.x, c.z - p.z) * 0.3;
-      if (score > bestD) { bestD = score; best = t; }
-    }
-    b.goalKey = ''; botPathTo(p, b, best);
+  // Panic only when it is right on top of them or they've just been hit.
+  if (mon && b.state !== 'flee' && (dm < 2.6 || time - p.lastHit < 0.3)) {
+    b.state = 'flee'; b.t = 2.5 + Math.random(); botPathAway(p, b, mon);
   }
-  if (b.flee > 0) {
-    b.flee -= dt;
+  if (b.state === 'flee') {
+    b.t -= dt;
     const sprint = b.stamina > 0.05;
     b.stamina = clamp(b.stamina - (sprint ? dt / 4 : -dt * 0.15), 0, 1);
     const mode = sprint ? 'sprint' : 'walk';
     p.n = CFG.NOISE[mode]; p.c = 0;
-    if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt)) b.flee = 0;
+    if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) || b.t <= 0) { b.state = 'sneak'; if (mon) botPathAway(p, b, mon); }
+    return;
+  }
+  if (b.state === 'work' && seen && b.refreeze <= 0) { b.state = 'freeze'; b.t = 1.2 + Math.random() * 1.8; b.refreeze = 4; }
+  if (b.state === 'freeze') {
+    // Freeze: drop into a crouch and hold perfectly still (silent) while watching it.
+    p.n = 0; p.c = 1; if (mon) faceMonster();
+    b.t -= dt;
+    if (b.t <= 0) { b.state = 'sneak'; if (mon) botPathAway(p, b, mon); }
+    return;
+  }
+  if (b.state === 'sneak') {
+    // Creep away in a crouch. Freeze again if it comes closer while moving.
+    p.c = 1; p.n = CFG.NOISE.crouch;
+    if (mon && seen && mon.spd > 0.6 && dm < 7 && b.refreeze <= 0) { b.state = 'freeze'; b.t = 1 + Math.random(); b.refreeze = 4; return; }
+    if (botStep(p, b, CFG.SPEED.crouch, CFG.SURV_R, dt) || dm > 18) {
+      if (dm > 14 || !mon) b.state = 'work'; else if (mon) botPathAway(p, b, mon);
+    }
     return;
   }
   b.stamina = clamp(b.stamina + dt * 0.2, 0, 1);
   if (b.wait > 0) { b.wait -= dt; p.n = 0; return; }
 
-  // Sneak when the monster is within earshot, otherwise walk.
-  const mode = dm < 16 ? 'crouch' : 'walk';
+  // Stay crouched for a while after a sighting, otherwise walk.
+  const mode = b.alert > 0 ? 'crouch' : 'walk';
   p.c = mode === 'crouch' ? 1 : 0;
 
   if (hs.gateOpen) {
@@ -1253,6 +1343,7 @@ function onStart(msg) {
       me.isMonster = p.isMonster; me.pos.set(p.x, 0, p.z); me.yaw = p.ry; me.pitch = 0;
       me.hp = CFG.MAX_HP; me.status = 'alive'; me.stamina = 1; me.exhausted = false; me.attackCD = 0; me.sonarCD = 2;
       me.escapeSent = false; me.boost = 0; me.damage = 0; me.repairGen = -1; me.colorIdx = p.colorIdx;
+      me.killCam = null; me.roll = 0; me.flinch = 0; me.camo = 0; me.stillT = 0;
       me.eye = me.isMonster ? 2.3 : 1.6;
     } else addRemote(p);
   }
@@ -1273,6 +1364,7 @@ function addRemote(p) {
     id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot,
     pos: new THREE.Vector3(p.x, 0, p.z), target: new THREE.Vector3(p.x, 0, p.z), yaw: p.ry, targetYaw: p.ry,
     noise: 0, crouch: 0, repairing: 0, hp: CFG.MAX_HP, status: 'alive', stepT: Math.random(), speed: 0, walkT: 0,
+    anim: { crouch: 0, repair: 0, lean: 0, flinch: 0, dead: -1, deadDelay: 0 },
     avatar: p.isMonster ? makeMonsterAvatar() : makeSurvivorAvatar(p.name, p.colorIdx || 0),
   };
   players.set(p.id, r);
@@ -1304,28 +1396,49 @@ function onSnap(msg) {
     }
     const r = players.get(s.id); if (!r) continue;
     r.target.set(s.x, 0, s.z); r.targetYaw = s.ry; r.noise = s.n; r.crouch = s.c; r.repairing = s.r; r.hp = s.hp;
-    if (r.status !== s.s) { r.status = s.s; r.avatar.visible = s.s === 'alive'; }
+    if (r.status !== s.s) {
+      r.status = s.s;
+      if (s.s === 'escaped') r.avatar.visible = false;
+      if (s.s === 'caught' && r.anim.dead < 0 && r.anim.deadDelay <= 0) r.anim.dead = 0; // missed the kill event
+    }
   }
   for (const id of [...players.keys()]) if (!seen.has(id)) removeRemote(id);
 }
 function setMyStatus(s) {
   const prev = me.status; me.status = s;
   if (s === prev || me.isMonster) return;
-  if (s === 'caught') addFeed('You were taken. Spectating — press V for monster vision.', 'bad');
+  if (s === 'caught' && !me.killCam) addFeed('You were taken. Spectating. Press V for monster vision.', 'bad');
   if (s === 'escaped') addFeed('You escaped! Spectating — press V for monster vision.', 'good');
 }
 function onEvent(e) {
   const pos = new THREE.Vector3(e.x || 0, 0.1, e.z || 0);
   switch (e.k) {
+    case 'swing': {
+      const m = players.get(e.by);
+      const M = m?.avatar.userData.monster;
+      if (M && M.kill < 0) { M.swing = 0.55; M.swingSide = -M.swingSide; }
+      if (m && !me.isMonster) noise({ dur: 0.3, vol: 0.3 * distVol(m.pos, 25), pan: panOf(m.pos), freq: 1600, q: 0.8 });
+      break;
+    }
     case 'hit': {
-      addRipple(pos, 14, 1.6, 12);
+      const lethal = e.hp <= 0;
+      addRipple(pos, lethal ? 22 : 14, lethal ? 2.2 : 1.6, 12);
+      const m = players.get(e.by), M = m?.avatar.userData.monster;
+      if (lethal && m) {
+        // Monster kill animation, turned toward its victim.
+        if (M) { M.kill = 0; M.swing = 0; }
+        m.targetYaw = Math.atan2(-(e.x - m.pos.x), -(e.z - m.pos.z));
+      }
       if (e.id === me.id) {
         me.damage = 1; me.boost = 2.5; sfx.hit();
-        if (e.hp <= 0) setMyStatus('caught'); else addFeed('You are wounded! RUN.', 'bad');
+        if (lethal) startKillCam(e.by); else { me.flinch = 1; addFeed('You are wounded! RUN.', 'bad'); }
       } else {
-        if (me.isMonster) { sfx.hit(); addFeed(e.hp <= 0 ? `${e.name} was taken.` : `You wounded ${e.name}.`, 'good'); }
-        else { addFeed(e.hp <= 0 ? `${e.name} was taken.` : `${e.name} was wounded.`, 'bad'); noise({ dur: 0.4, vol: 0.25 * distVol(pos, 40), pan: panOf(pos), freq: 600 }); }
-        const r = players.get(e.id); if (r && e.hp <= 0) { r.status = 'caught'; r.avatar.visible = false; }
+        const r = players.get(e.id);
+        if (r) { if (lethal) { r.status = 'caught'; r.anim.deadDelay = m ? KILL.raise + 0.05 : 0.01; } else r.anim.flinch = 1; }
+        if (me.isMonster) {
+          sfx.hit(); addFeed(lethal ? `You took ${e.name}.` : `You wounded ${e.name}.`, 'good');
+          if (lethal) { me.lunge = 1.6; monsterPost.pass.uniforms.uPulse.value = 1.4; }
+        } else { addFeed(lethal ? `${e.name} was taken.` : `${e.name} was wounded.`, 'bad'); noise({ dur: 0.4, vol: 0.25 * distVol(pos, 40), pan: panOf(pos), freq: 600 }); }
       }
       break;
     }
@@ -1479,6 +1592,35 @@ function monsterSonar() {
 //  LOCAL SIMULATION
 // ----------------------------------------------------------------------------
 const _v = new THREE.Vector3();
+// First-person death: you're turned to face the monster as it rears up and slams down,
+// then you collapse to the floor before switching to spectating.
+function startKillCam(by) {
+  me.killCam = { t: 0, by, slammed: false };
+  me.status = 'caught';
+  me.noise = 0; me.repairing = false;
+}
+function updateKillCam(dt) {
+  const K = me.killCam; K.t += dt;
+  const m = players.get(K.by);
+  if (m) {
+    const head = 2.35, d = Math.max(0.5, Math.hypot(m.pos.x - me.pos.x, m.pos.z - me.pos.z));
+    me.yaw = angleDamp(me.yaw, Math.atan2(-(m.pos.x - me.pos.x), -(m.pos.z - me.pos.z)), 8, dt);
+    if (K.t < KILL.slam) me.pitch = damp(me.pitch, Math.atan2(head - me.eye, d), 6, dt);
+  }
+  if (K.t >= KILL.raise + 0.15 && !K.slammed) { K.slammed = true; me.damage = 1.4; sfx.hit(); sfx.heavyStep(0.9, 0); }
+  // Collapse: drop to the floor and roll onto your side, looking up.
+  const fall = ease((K.t - KILL.slam) / 0.6);
+  me.eye = lerp(me.crouch ? 1.0 : 1.6, 0.25, fall);
+  me.roll = 1.2 * fall;
+  if (K.t > KILL.slam) me.pitch = damp(me.pitch, 0.5, 3, dt);
+  const shake = K.t < KILL.slam + 0.3 ? (K.t > KILL.raise ? 0.06 : 0.015) : 0;
+  camera.position.set(me.pos.x + (Math.random() - 0.5) * shake, me.eye + (Math.random() - 0.5) * shake, me.pos.z);
+  camera.rotation.set(me.pitch, me.yaw, me.roll);
+  if (K.t > 2.8) {
+    me.killCam = null; me.roll = 0; me.eye = 1.8;
+    addFeed('You were taken. Spectating. Press V for monster vision.', 'bad');
+  }
+}
 function updateLocal(dt) {
   me.attackCD = Math.max(0, me.attackCD - dt);
   me.sonarCD = Math.max(0, me.sonarCD - dt);
@@ -1486,6 +1628,8 @@ function updateLocal(dt) {
   me.damage = Math.max(0, me.damage - dt * 1.2);
   me.lunge = Math.max(0, me.lunge - dt * 4);
 
+  if (me.killCam) { updateKillCam(dt); return; }
+  me.flinch = Math.max(0, (me.flinch || 0) - dt * 3);
   const ctrl = controlsActive();
   let fx = 0, fz = 0;
   if (ctrl) {
@@ -1542,6 +1686,10 @@ function updateLocal(dt) {
   if (me.boost > 0) speed *= 1.35;
   if (moving) moveWithCollision(me.pos, mx * speed * dt, mz * speed * dt, me.isMonster ? CFG.MON_R : CFG.SURV_R);
   me.moving = moving;
+  if (me.isMonster) {
+    me.stillT = moving || me.attackCD > CFG.ATTACK_CD - 0.5 ? 0 : (me.stillT || 0) + dt;
+    me.camo = me.stillT > 0.6 ? Math.min(1, (me.camo || 0) + dt / 1.4) : Math.max(0, (me.camo || 0) - dt / 0.25);
+  }
 
   // ---- Noise (what the monster "sees")
   me.noise = !moving ? (me.repairing ? CFG.NOISE.repair : 0) : me.crouch ? CFG.NOISE.crouch : me.sprint ? CFG.NOISE.sprint : CFG.NOISE.walk;
@@ -1572,7 +1720,103 @@ function updateLocal(dt) {
 function applyCamera(dt, bobAmp) {
   camera.position.set(me.pos.x, me.eye + Math.sin(me.bob) * bobAmp, me.pos.z);
   if (me.lunge > 0) { camera.position.x -= Math.sin(me.yaw) * me.lunge * 0.3; camera.position.z -= Math.cos(me.yaw) * me.lunge * 0.3; }
-  camera.rotation.set(me.pitch, me.yaw, Math.sin(me.bob * 0.5) * bobAmp * 0.3);
+  camera.rotation.set(me.pitch - (me.flinch || 0) * 0.12, me.yaw, Math.sin(me.bob * 0.5) * bobAmp * 0.3 + (me.flinch || 0) * 0.08);
+}
+
+// ---- Avatar animation -------------------------------------------------------
+const _q = new THREE.Quaternion(), _axis = new THREE.Vector3();
+const AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
+// Rotate a bone about one of its local axes, on top of whatever the mixer set this frame.
+function boneRot(b, axis, ang) { if (b && ang) b.quaternion.multiply(_q.setFromAxisAngle(AXES[axis], ang)); }
+const ease = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+const KILL = { raise: 0.45, slam: 0.7, recover: 1.25, end: 1.7 }; // monster kill timeline (s)
+
+function animateSurvivor(r, dt) {
+  const a = r.avatar, A = r.anim, rig = a.userData.rig, B = a.userData.bones;
+  A.flinch = Math.max(0, A.flinch - dt * 2.5);
+  if (A.deadDelay > 0) { A.deadDelay -= dt; if (A.deadDelay <= 0) A.dead = 0; }
+  const dead = A.dead >= 0;
+  A.crouch = damp(A.crouch, !dead && (r.crouch || r.repairing) ? 1 : 0, 8, dt);
+  A.repair = damp(A.repair, !dead && r.repairing ? 1 : 0, 6, dt);
+  A.lean = damp(A.lean, clamp((r.speed - 4) / 2, 0, 1), 6, dt);
+  const mixer = a.userData.mixer, acts = a.userData.acts;
+  if (mixer && acts?.walk) {
+    // Blend idle <-> walk by speed. Crouch-walking uses short, slow strides.
+    const w = dead ? 0 : clamp(r.speed / 1.2, 0, 1);
+    acts.walk.setEffectiveWeight(w); acts.idle.setEffectiveWeight(1 - w);
+    acts.walk.timeScale = clamp(r.speed / (A.crouch > 0.5 ? 1.5 : 3.2), 0.4, 2.2);
+    mixer.update(dead ? 0 : dt);
+  }
+  if (B) {
+    const c = A.crouch, rp = A.repair;
+    // Crouch: thighs forward, knees bent, feet flat, back hunched.
+    boneRot(B.lUp, 'x', 1.0 * c); boneRot(B.rUp, 'x', 1.0 * c);
+    boneRot(B.lLeg, 'x', -1.75 * c); boneRot(B.rLeg, 'x', -1.75 * c);
+    boneRot(B.lFoot, 'x', 0.75 * c); boneRot(B.rFoot, 'x', 0.75 * c);
+    boneRot(B.spine, 'x', 0.25 * c + 0.35 * rp + 0.3 * A.lean - 0.6 * A.flinch);
+    boneRot(B.neck, 'x', -0.25 * c);
+    // Repair: arms reach forward and work at the panel.
+    const work = Math.sin(time * 9) * 0.18 * rp;
+    boneRot(B.lArm, 'z', (1.0 + work) * rp); boneRot(B.rArm, 'z', -(1.0 - work) * rp);
+    boneRot(B.lFore, 'z', 0.5 * rp); boneRot(B.rFore, 'z', -0.5 * rp);
+    // Death: arms flung out.
+    if (dead) { const k = ease(A.dead / 0.6); boneRot(B.lArm, 'z', -0.9 * k); boneRot(B.rArm, 'z', 0.9 * k); boneRot(B.spine, 'x', -0.3 * k); }
+    rig.position.y = -0.42 * A.crouch;
+  } else {
+    rig.scale.y = damp(rig.scale.y, r.crouch ? 0.68 : 1, 10, dt);
+    rig.position.y = Math.abs(Math.sin(r.walkT)) * 0.05 * Math.min(r.speed, 2);
+  }
+  if (dead) {
+    // Fall backwards onto the floor with a small bounce.
+    A.dead += dt;
+    const t = A.dead, k = t < 0.55 ? ease(t / 0.55) : 1 + Math.sin(Math.min(1, (t - 0.55) / 0.25) * Math.PI) * 0.05;
+    rig.rotation.x = 1.5 * k; rig.position.z = 0.25 * k; rig.position.y = 0.05 * k;
+  } else {
+    rig.rotation.x = -0.25 * A.flinch; rig.position.z = 0;
+  }
+}
+
+function animateMonster(r, dt) {
+  const a = r.avatar, rig = a.userData.rig, M = a.userData.monster;
+  const gait = Math.min(r.speed, 6);
+  let L = 0, Rt = 0, lean = 0.1 + gait * 0.025 + Math.sin(time * 1.3) * 0.03, lunge = 0, bob = 0;
+  // Walk: lurching bob and counter-swinging arms; idle: slow breathing sway.
+  const swing = Math.sin(r.walkT * 0.5) * 0.5 * Math.min(gait / 3, 1);
+  L = swing + Math.sin(time * 1.1) * 0.06; Rt = -swing + Math.sin(time * 1.1 + 1) * 0.06;
+  bob = Math.abs(Math.sin(r.walkT * 0.5)) * 0.08 * Math.min(gait, 1.5) + Math.sin(time * 2) * 0.015;
+  rig.rotation.z = Math.sin(r.walkT * 0.5) * 0.05 * Math.min(gait, 1.5);
+  if (M) {
+    if (M.swing > 0) {
+      // Claw swipe: wind up, then rake down and across.
+      M.swing = Math.max(0, M.swing - dt);
+      const p = 1 - M.swing / 0.55;
+      const ang = p < 0.35 ? lerp(0, 2.1, ease(p / 0.35)) : lerp(2.1, -0.5, ease((p - 0.35) / 0.65));
+      if (M.swingSide > 0) Rt = ang; else L = ang;
+      lunge = Math.sin(p * Math.PI) * 0.35; lean += Math.sin(p * Math.PI) * 0.25;
+    }
+    if (M.kill >= 0) {
+      // Kill: rear up with both arms raised, slam them down, then straighten.
+      M.kill += dt;
+      const t = M.kill;
+      let arms;
+      if (t < KILL.raise) { arms = lerp(0, 2.5, ease(t / KILL.raise)); lean = lerp(lean, -0.25, ease(t / KILL.raise)); }
+      else if (t < KILL.slam) { const k = ease((t - KILL.raise) / (KILL.slam - KILL.raise)); arms = lerp(2.5, -0.3, k); lean = lerp(-0.25, 0.6, k); lunge = 0.7 * k; }
+      else if (t < KILL.recover) { arms = -0.3; lean = 0.6; lunge = 0.7; }
+      else { const k = ease((t - KILL.recover) / (KILL.end - KILL.recover)); arms = lerp(-0.3, 0, k); lean = lerp(0.6, lean, k); lunge = lerp(0.7, 0, k); }
+      L = Rt = arms;
+      if (t > KILL.end) M.kill = -1;
+    }
+    M.U.uArms.value.set(L, Rt);
+    // Camouflage: standing still for a moment fades it into the background for survivors.
+    M.stillT = r.speed < 0.3 && M.swing <= 0 && M.kill < 0 ? M.stillT + dt : 0;
+    M.camo = M.stillT > 0.6 ? Math.min(1, M.camo + dt / 1.4) : Math.max(0, M.camo - dt / 0.25);
+    const op = 1 - 0.95 * M.camo;
+    for (const m of M.mats) m.opacity = op;
+    for (const o of M.meshes) o.castShadow = M.camo < 0.5;
+  }
+  rig.rotation.x = lean;
+  rig.position.y = bob;
+  rig.position.z = -lunge;
 }
 
 function updateRemotes(dt) {
@@ -1586,25 +1830,7 @@ function updateRemotes(dt) {
     const a = r.avatar;
     a.position.copy(r.pos); a.rotation.y = r.yaw;
     r.walkT += dt * r.speed * 2.4;
-    const rig = a.userData.rig;
-    const mixer = a.userData.mixer, acts = a.userData.acts;
-    if (mixer && acts?.walk) {
-      // Blend idle <-> walk by speed; play the walk faster when sprinting.
-      const w = clamp(r.speed / 1.5, 0, 1);
-      acts.walk.setEffectiveWeight(w); acts.idle.setEffectiveWeight(1 - w);
-      acts.walk.timeScale = clamp(r.speed / 3.2, 0.5, 2);
-      mixer.update(dt);
-    } else rig.position.y = Math.abs(Math.sin(r.walkT)) * 0.05 * Math.min(r.speed, 2);
-    rig.scale.y = damp(rig.scale.y, r.crouch ? 0.68 : 1, 10, dt);
-    if (r.isMonster) {
-      // The monster model is static, so give it a hunched, lurching gait procedurally.
-      const gait = Math.min(r.speed, 6);
-      rig.rotation.x = 0.1 + gait * 0.025 + Math.sin(time * 1.3) * 0.03;
-      rig.rotation.z = Math.sin(r.walkT * 0.5) * 0.05 * Math.min(gait, 1.5);
-      rig.position.y = Math.abs(Math.sin(r.walkT * 0.5)) * 0.08 * Math.min(gait, 1.5) + Math.sin(time * 2) * 0.015;
-      const al = rig.getObjectByName('armL'), ar = rig.getObjectByName('armR');
-      if (al) { al.rotation.x = -0.25 + Math.sin(r.walkT) * 0.4; ar.rotation.x = -0.25 - Math.sin(r.walkT) * 0.4; }
-    }
+    if (r.isMonster) animateMonster(r, dt); else animateSurvivor(r, dt);
     if (r.status !== 'alive') continue;
 
     if (r.isMonster) {
@@ -1676,11 +1902,13 @@ function updateHUD() {
   const left = game.gens.filter((g) => !g.done).length;
   $('#hud-objective').textContent = game.gateOpen ? 'EXIT GATE OPEN' : `Generators ${game.gens.length - left}/${game.gens.length}`;
   let prompt = '';
-  if (me.status !== 'alive' && !me.isMonster) prompt = `Spectating · WASD fly · Space/C up/down · V ${viewMode === 'monster' ? 'normal' : 'monster'} vision`;
+  if (me.status !== 'alive' && !me.isMonster && !me.killCam) prompt = `Spectating · WASD fly · Space/C up/down · V ${viewMode === 'monster' ? 'normal' : 'monster'} vision`;
   if (me.isMonster) {
     $('#sonar-fill').style.width = `${(1 - me.sonarCD / CFG.SONAR_CD) * 100}%`;
     $('#attack-fill').style.width = `${(1 - me.attackCD / CFG.ATTACK_CD) * 100}%`;
     $('#mstamina-fill').style.width = `${me.stamina * 100}%`;
+    $('#camo-fill').style.width = `${(me.camo || 0) * 100}%`;
+    $('#camo-label').textContent = (me.camo || 0) > 0.95 ? 'Hidden' : 'Camouflage';
     let prey = 0; for (const r of players.values()) if (!r.isMonster && r.status === 'alive') prey++;
     $('#prey-count').textContent = prey;
   } else {
@@ -1799,9 +2027,10 @@ loadAssets((f) => menuStatus(`Loading models… ${Math.round(f * 100)}%`)).final
   for (const id of ['#btn-bot-survivor', '#btn-bot-monster', '#btn-host', '#btn-offline', '#btn-join']) $(id).disabled = false;
 });
 
+const DEBUG = { dtScale: 1 }; // set to 0 from the console to freeze the simulation
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const dt = Math.min(clock.getDelta(), 0.05) * DEBUG.dtScale;
   time += dt;
   sonarShared.uTime.value = time;
 
@@ -1822,4 +2051,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, hostUpdate };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, hostUpdate, hostAttack, DEBUG, KILL };

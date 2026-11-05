@@ -89,6 +89,7 @@ kbd { border: 1px solid var(--line); padding: 0 4px; font-size: 11px; background
 .bar > div { height: 100%; width: 0; background: #e8e8e8; transition: width .08s linear; }
 .bar.noise > div { background: linear-gradient(90deg, #3bff8a, #ffb43b, #ff3b3b); }
 .bar.sonar > div { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.bar.camo > div { background: linear-gradient(90deg, #1d3a2a, #8fa89a); }
 #hp-pips span { display: inline-block; width: 14px; height: 14px; margin-left: 4px; border: 1px solid var(--red); }
 #hp-pips span.on { background: var(--red); box-shadow: 0 0 6px var(--red); }
 #prey-count { color: var(--green); font-size: 16px; }
