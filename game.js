@@ -16,8 +16,6 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 //  CONFIG
 // ----------------------------------------------------------------------------
 const CFG = {
-  TILE: 4,
-  WALL_H: 3.6,
   DURATION: 300,          // seconds survivors must last
   GEN_TIME: 14,           // seconds of solo repair per generator
   SURV_R: 0.35,
@@ -33,33 +31,6 @@ const CFG = {
   NET_HZ: 20,
   PEER_PREFIX: 'blindsight-room-',
 };
-
-// '#' wall · '.' floor · 'C' crate · 'G' generator · 'S' survivor spawn
-// 'M' monster spawn · 'D' exit gate · 'X' escape zone
-const MAP = [
-  '############################',
-  '#S.....#........#.........G#',
-  '#.##...#..####..#..####....#',
-  '#.#.......#..#.....#..#..C.#',
-  '#.#.C.....#..#..C..#..#....#',
-  '#...###...#......###..###..#',
-  '###...#...####.........#...#',
-  '#G#...#.......#..###...#.###',
-  '#...#.##..##..#..#M#...#...#',
-  '#...#.....#...#..#.#.......#',
-  '#.###..C..#...#....#..##...#',
-  '#.....###.#..####..#...#...#',
-  '#..#......#........#.C.#...#',
-  '#..####..###..###..###.#...#',
-  '#S......................#..#',
-  '#######..########..####.#..#',
-  '#.....#..#.......C......#..#',
-  '#..C..#..#..#####...#####..#',
-  '#.........S...G#...........#',
-  '############D###############',
-  '###########XXX##############',
-  '###########XXX##############',
-];
 
 // ----------------------------------------------------------------------------
 //  UTILITIES
@@ -85,58 +56,78 @@ const r2 = (v) => Math.round(v * 100) / 100;
 const fmtTime = (s) => { s = Math.max(0, Math.ceil(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 // ----------------------------------------------------------------------------
-//  MAP HELPERS
+//  FOREST MAP
 // ----------------------------------------------------------------------------
-const { TILE, WALL_H } = CFG;
-const MH = MAP.length;
-const MW = Math.max(...MAP.map((r) => r.length));
-const grid = MAP.map((r) => r.padEnd(MW, '#').split(''));
-const cell = (x, z) => (x < 0 || z < 0 || x >= MW || z >= MH ? '#' : grid[z][x]);
-const tileCenter = (x, z) => new THREE.Vector3((x + 0.5) * TILE, 0, (z + 0.5) * TILE);
-const findTiles = (ch) => {
-  const out = [];
-  for (let z = 0; z < MH; z++) for (let x = 0; x < MW; x++) if (grid[z][x] === ch) out.push({ x, z });
-  return out;
-};
-const GEN_TILES = findTiles('G');
-const SPAWN_S = findTiles('S');
-const SPAWN_M = findTiles('M')[0];
-const GATE_TILE = findTiles('D')[0];
-const FLOOR_TILES = [];
-for (let z = 0; z < MH; z++) for (let x = 0; x < MW; x++) if ('.SM'.includes(grid[z][x])) FLOOR_TILES.push({ x, z });
+// A fenced square of night forest, 0..AREA metres on x and z. Two cabins and a shed
+// each hold a generator; a campfire clearing is the survivors' camp. The exit gate is
+// in the south fence, and the road beyond it (EXIT_ZONE) is the escape.
+const AREA = 120;
+const FENCE = 2;                                   // fence line inset from the area edge
+const GATE = { x: 60, z: AREA - FENCE, w: 4.4 };   // opening in the south fence
+const EXIT_ZONE = { minX: 56.5, maxX: 63.5, minZ: AREA + 1, maxZ: AREA + 14 };
+const CABINS = [
+  // x/z = centre, w (x) by d (z) metres, door side, optional interior wall
+  { x: 38, z: 40, w: 10, d: 8, door: 'south', split: true },
+  { x: 88, z: 68, w: 8, d: 7, door: 'west' },
+  { x: 28, z: 86, w: 5, d: 4.4, door: 'east' },
+];
+const GENS = [
+  { x: 34.6, z: 38.4, ry: Math.PI / 2 },   // main cabin, west room
+  { x: 90, z: 66.4, ry: 0 },               // hunting cabin
+  { x: 26.8, z: 86, ry: Math.PI / 2 },     // shed
+];
+const CAMPFIRE = { x: 58, z: 96 };
+const SPAWN_SURV = [[54, 99], [62, 99], [58, 101.5], [55, 93], [61, 93], [58, 90.5]];
+const SPAWN_MON = { x: 98, z: 18 };
+const PATHS = [
+  [[60, AREA + 14], [60, 112], [59, 104], [58, 96]],
+  [[58, 96], [53, 80], [46, 62], [40, 50], [38, 45]],
+  [[58, 96], [70, 86], [80, 74], [83.5, 68]],
+  [[58, 96], [44, 92], [31, 86]],
+];
+const doorPos = (c) => ({
+  south: { x: c.x, z: c.z + c.d / 2 }, north: { x: c.x, z: c.z - c.d / 2 },
+  east: { x: c.x + c.w / 2, z: c.z }, west: { x: c.x - c.w / 2, z: c.z },
+}[c.door]);
 
-// Collision boxes (AABB on XZ plane), reused to avoid allocations.
-const _box = { minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
-function solidBox(tx, tz) {
-  const c = cell(tx, tz);
-  const x0 = tx * TILE, z0 = tz * TILE;
-  let half = 0;
-  if (c === '#' || (c === 'D' && !game.gateOpen)) half = TILE / 2;
-  else if (c === 'C') half = 0.9;
-  else if (c === 'G') half = 0.75;
-  else return null;
-  const cx = x0 + TILE / 2, cz = z0 + TILE / 2;
-  _box.minX = cx - half; _box.maxX = cx + half; _box.minZ = cz - half; _box.maxZ = cz + half;
-  return _box;
+// ---- Colliders: circles (trees, rocks) and boxes (walls, fence) in a 4 m spatial hash
+const COLLIDERS = [];
+const colHash = new Map();
+const COL_CELL = 4;
+const colKey = (cx, cz) => (cx + 64) * 1024 + (cz + 64);
+function addCollider(c) {
+  COLLIDERS.push(c);
+  const [x0, z0, x1, z1] = c.t === 0 ? [c.x - c.r, c.z - c.r, c.x + c.r, c.z + c.r] : [c.minX, c.minZ, c.maxX, c.maxZ];
+  for (let cx = Math.floor(x0 / COL_CELL); cx <= Math.floor(x1 / COL_CELL); cx++)
+    for (let cz = Math.floor(z0 / COL_CELL); cz <= Math.floor(z1 / COL_CELL); cz++) {
+      const k = colKey(cx, cz); if (!colHash.has(k)) colHash.set(k, []); colHash.get(k).push(c);
+    }
 }
-// Circle-vs-AABB push-out, gives smooth wall sliding.
+const addCircle = (x, z, r, tag) => addCollider({ t: 0, x, z, r, tag });
+const addBox = (minX, minZ, maxX, maxZ, tag) => addCollider({ t: 1, minX, minZ, maxX, maxZ, tag });
+// Circle-vs-shape push-out, gives smooth sliding along walls and round trunks.
 function resolveCollision(p, r) {
   for (let iter = 0; iter < 3; iter++) {
-    const tx = Math.floor(p.x / TILE), tz = Math.floor(p.z / TILE);
+    const cx0 = Math.floor(p.x / COL_CELL), cz0 = Math.floor(p.z / COL_CELL);
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-      const b = solidBox(tx + dx, tz + dz);
-      if (!b) continue;
-      const cx = clamp(p.x, b.minX, b.maxX), cz = clamp(p.z, b.minZ, b.maxZ);
-      const ox = p.x - cx, oz = p.z - cz, d2 = ox * ox + oz * oz;
-      if (d2 >= r * r) continue;
-      if (d2 > 1e-8) {
-        const d = Math.sqrt(d2);
-        p.x += (ox / d) * (r - d); p.z += (oz / d) * (r - d);
-      } else {
-        const l = p.x - b.minX, rr = b.maxX - p.x, t = p.z - b.minZ, bt = b.maxZ - p.z;
-        const m = Math.min(l, rr, t, bt);
-        if (m === l) p.x = b.minX - r; else if (m === rr) p.x = b.maxX + r;
-        else if (m === t) p.z = b.minZ - r; else p.z = b.maxZ + r;
+      const list = colHash.get(colKey(cx0 + dx, cz0 + dz));
+      if (!list) continue;
+      for (const c of list) {
+        if (c.tag === 'gate' && game.gateOpen) continue;
+        if (c.t === 0) {
+          const ox = p.x - c.x, oz = p.z - c.z, d = Math.hypot(ox, oz), min = c.r + r;
+          if (d >= min) continue;
+          if (d > 1e-6) { p.x = c.x + (ox / d) * min; p.z = c.z + (oz / d) * min; } else p.x += min;
+        } else {
+          const qx = clamp(p.x, c.minX, c.maxX), qz = clamp(p.z, c.minZ, c.maxZ);
+          const ox = p.x - qx, oz = p.z - qz, d2 = ox * ox + oz * oz;
+          if (d2 >= r * r) continue;
+          if (d2 > 1e-8) { const d = Math.sqrt(d2); p.x += (ox / d) * (r - d); p.z += (oz / d) * (r - d); }
+          else {
+            const l = p.x - c.minX, rr = c.maxX - p.x, t = p.z - c.minZ, bt = c.maxZ - p.z, m = Math.min(l, rr, t, bt);
+            if (m === l) p.x = c.minX - r; else if (m === rr) p.x = c.maxX + r; else if (m === t) p.z = c.minZ - r; else p.z = c.maxZ + r;
+          }
+        }
       }
     }
   }
@@ -146,26 +137,97 @@ function moveWithCollision(p, dx, dz, r) {
   const steps = Math.max(1, Math.ceil(len / (r * 0.7)));
   for (let i = 0; i < steps; i++) { p.x += dx / steps; p.z += dz / steps; resolveCollision(p, r); }
 }
-// BFS path between tiles (used by bots).
+const inExit = (x, z) => x > EXIT_ZONE.minX && x < EXIT_ZONE.maxX && z > EXIT_ZONE.minZ;
+
+// ---- Navigation grid (0.5 m cells) for bots ---------------------------------------
+const NAV_RES = 2; // cells per metre
+const NAV_W = AREA * NAV_RES, NAV_H = Math.ceil(EXIT_ZONE.maxZ * NAV_RES) + 1;
+const navBlocked = new Uint8Array(NAV_W * NAV_H); // 0 free, 1 blocked, 2 gate, 3 exit road
+const navIdx = (x, z) => z * NAV_W + x;
+const tileOf = (x, z) => ({ x: clamp(Math.floor(x * NAV_RES), 0, NAV_W - 1), z: clamp(Math.floor(z * NAV_RES), 0, NAV_H - 1) });
+const tileCenter = (x, z) => new THREE.Vector3((x + 0.5) / NAV_RES, 0, (z + 0.5) / NAV_RES);
+function buildNav() {
+  // Clearance covers the widest agent (the monster, 0.45 m) so every free cell is reachable.
+  const AG = 0.55, AGB = 0.47;
+  for (let z = 0; z < NAV_H; z++) for (let x = 0; x < NAV_W; x++) {
+    const px = (x + 0.5) / NAV_RES, pz = (z + 0.5) / NAV_RES;
+    let v = 0;
+    const inside = px > FENCE && px < AREA - FENCE && pz > FENCE && pz < AREA - FENCE;
+    const road = px > EXIT_ZONE.minX && px < EXIT_ZONE.maxX && pz >= AREA - FENCE - 1;
+    if (!inside && !road) v = 1;
+    if (road && pz > AREA - FENCE + 0.6) v = 3;
+    if (!v) {
+      const near = [];
+      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) near.push(...(colHash.get(colKey(Math.floor(px / COL_CELL) + dx, Math.floor(pz / COL_CELL) + dz)) || []));
+      for (const c of near) {
+        const hit = c.t === 0 ? Math.hypot(px - c.x, pz - c.z) < c.r + AG
+          : px > c.minX - AGB && px < c.maxX + AGB && pz > c.minZ - AGB && pz < c.maxZ + AGB;
+        if (hit) { v = c.tag === 'gate' ? 2 : 1; if (v === 1) break; }
+      }
+    }
+    navBlocked[navIdx(x, z)] = v;
+  }
+}
+const navOpen = (x, z, allowExit) => {
+  if (x < 0 || z < 0 || x >= NAV_W || z >= NAV_H) return false;
+  const v = navBlocked[navIdx(x, z)];
+  return v === 0 || (allowExit && game.gateOpen && (v === 2 || v === 3));
+};
+const NAV_FREE = [];
+// 8-way breadth-first search on the nav grid, then line-of-sight smoothing.
+const _prev = new Int32Array(NAV_W * NAV_H), _queue = new Int32Array(NAV_W * NAV_H);
 function bfsPath(from, to, allowExit = false) {
-  const key = (x, z) => z * MW + x;
-  const prev = new Map([[key(from.x, from.z), -1]]);
-  const q = [from];
-  while (q.length) {
-    const c = q.shift();
-    if (c.x === to.x && c.z === to.z) break;
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nx = c.x + dx, nz = c.z + dz, ch = cell(nx, nz);
-      if ('#CG'.includes(ch) || (!allowExit && 'DX'.includes(ch)) || prev.has(key(nx, nz))) continue;
-      prev.set(key(nx, nz), key(c.x, c.z));
-      q.push({ x: nx, z: nz });
+  if (!navOpen(to.x, to.z, allowExit)) to = nearestOpen(to, allowExit);
+  if (!to) return [];
+  _prev.fill(-2);
+  let head = 0, tail = 0;
+  const start = navIdx(from.x, from.z), goal = navIdx(to.x, to.z);
+  _prev[start] = -1; _queue[tail++] = start;
+  while (head < tail) {
+    const c = _queue[head++];
+    if (c === goal) break;
+    const cx = c % NAV_W, cz = (c / NAV_W) | 0;
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dz) continue;
+      const nx = cx + dx, nz = cz + dz;
+      if (!navOpen(nx, nz, allowExit)) continue;
+      if (dx && dz && (!navOpen(cx + dx, cz, allowExit) || !navOpen(cx, cz + dz, allowExit))) continue; // no corner cutting
+      const n = navIdx(nx, nz);
+      if (_prev[n] !== -2) continue;
+      _prev[n] = c; _queue[tail++] = n;
     }
   }
-  if (!prev.has(key(to.x, to.z))) return [];
-  const path = [];
-  for (let k = key(to.x, to.z); k !== -1; k = prev.get(k)) path.push({ x: k % MW, z: Math.floor(k / MW) });
-  return path.reverse();
+  if (_prev[goal] === -2) return [];
+  const raw = [];
+  for (let k = goal; k !== -1; k = _prev[k]) raw.push({ x: k % NAV_W, z: (k / NAV_W) | 0 });
+  raw.reverse();
+  // Smooth: from each kept point, jump to the furthest point still in clear line of sight.
+  const out = [raw[0]];
+  let i = 0;
+  while (i < raw.length - 1) {
+    let j = Math.min(raw.length - 1, i + 30);
+    while (j > i + 1 && !navLine(raw[i], raw[j], allowExit)) j--;
+    out.push(raw[j]); i = j;
+  }
+  return out;
 }
+function navLine(a, b, allowExit) {
+  const n = Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) * 2);
+  for (let k = 1; k < n; k++) {
+    const t = k / n;
+    if (!navOpen(Math.floor(a.x + 0.5 + (b.x - a.x) * t), Math.floor(a.z + 0.5 + (b.z - a.z) * t), allowExit)) return false;
+  }
+  return true;
+}
+function nearestOpen(t, allowExit) {
+  for (let r = 1; r < 12; r++) for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++)
+    if (navOpen(t.x + dx, t.z + dz, allowExit)) return { x: t.x + dx, z: t.z + dz };
+  return null;
+}
+const randomFloorTile = () => NAV_FREE[Math.floor(Math.random() * NAV_FREE.length)];
+const genPos = (i) => new THREE.Vector3(GENS[i].x, 0, GENS[i].z);
+// A free nav cell beside each generator, on its working side.
+const genApproach = (i) => nearestOpen(tileOf(GENS[i].x + Math.sin(GENS[i].ry) * 1.2, GENS[i].z + Math.cos(GENS[i].ry) * 1.2), false) || tileOf(GENS[i].x, GENS[i].z);
 
 // ----------------------------------------------------------------------------
 //  RENDERER, SCENE, CAMERA
@@ -180,10 +242,10 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 220);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 400);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
-const survivorFog = new THREE.FogExp2(0x0b0d0b, 0.04);
+const survivorFog = new THREE.FogExp2(0x101722, 0.024);
 const clock = new THREE.Clock();
 let time = 0;
 
@@ -198,52 +260,17 @@ const sonarShared = {
   uRip: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector4(0, 0, 0, -999)) },  // xyz origin, w start time
   uRipP: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector3(0, 0, 1)) },       // x maxRadius, y strength, z speed
 };
-// The wendigo has no skeleton. Its optimizer bakes a per-vertex arm weight (_arm: -1 one
-// arm, +1 the other) and the shoulder pivot, so the arms swing around the shoulder axis
-// in the vertex shader. Angles (uArms) are radians; positive swings the arm forward/up.
-const ARM_BEND_PARS = /* glsl */ `
-  attribute float _arm;
-  uniform vec2 uArms;
-  uniform vec3 uArmPivot;
-  mat3 armRot() {
-    float a = -(_arm < 0.0 ? uArms.x : uArms.y) * abs(_arm);
-    float c = cos(a), s = sin(a);
-    return mat3(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c);
-  }`;
-const ARM_BEND_NORMAL = `objectNormal = armRot() * objectNormal;`;
-const ARM_BEND_POS = `transformed = armRot() * (transformed - uArmPivot) + uArmPivot;`;
-function hookArmBend(material, U) {
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uArms = U.uArms; shader.uniforms.uArmPivot = U.uArmPivot;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\n' + ARM_BEND_PARS)
-      .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\n' + ARM_BEND_NORMAL)
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\n' + ARM_BEND_POS);
-  };
-  material.customProgramCacheKey = () => 'arm-bend';
-  return material;
-}
-
 // Skinning chunks let animated (SkinnedMesh) characters deform in monster vision too.
 const SONAR_VERT = /* glsl */ `
   #include <common>
   #include <skinning_pars_vertex>
-  #ifdef MONSTER_BEND
-  ${ARM_BEND_PARS}
-  #endif
   varying vec3 vWorld;
   varying vec3 vNormalW;
   void main() {
     #include <beginnormal_vertex>
-    #ifdef MONSTER_BEND
-    ${ARM_BEND_NORMAL}
-    #endif
     #include <skinbase_vertex>
     #include <skinnormal_vertex>
     #include <begin_vertex>
-    #ifdef MONSTER_BEND
-    ${ARM_BEND_POS}
-    #endif
     #include <skinning_vertex>
     vec4 wp = modelMatrix * vec4(transformed, 1.0);
     vWorld = wp.xyz;
@@ -260,6 +287,7 @@ const SONAR_FRAG = /* glsl */ `
   uniform float uGrid;      // grid cell size in metres
   uniform float uNearGain;  // faint "touch" sense right around the monster
   uniform vec3 uColor;
+  uniform float uSelf;      // 1 = this surface's own look; 0 = indistinguishable from the environment
   varying vec3 vWorld;
   varying vec3 vNormalW;
 
@@ -274,8 +302,9 @@ const SONAR_FRAG = /* glsl */ `
     vec3 an = abs(n);
     // Triplanar-ish projection: pick the plane most aligned with the surface.
     vec2 uv = an.y > 0.5 ? vWorld.xz : (an.x > an.z ? vWorld.zy : vWorld.xy);
-    float minor = gridLine(uv / uGrid) * 0.65;
-    float major = gridLine(uv / (uGrid * 4.0));
+    float grid = mix(1.0, uGrid, uSelf);
+    float minor = gridLine(uv / grid) * 0.65;
+    float major = gridLine(uv / (grid * 4.0));
     float lines = max(minor, major);
 
     // Accumulate expanding spherical shells from every active ripple.
@@ -297,22 +326,22 @@ const SONAR_FRAG = /* glsl */ `
     }
 
     float dc = distance(vWorld, uCamPos);
-    float base = uBase * (1.0 - smoothstep(8.0, 45.0, dc));
-    float near = (1.0 - smoothstep(0.0, 5.0, dc)) * uNearGain;
-    float I = base + energy * uGain + near;
+    float base = mix(0.05, uBase, uSelf) * (1.0 - smoothstep(8.0, 45.0, dc));
+    float near = (1.0 - smoothstep(0.0, 5.0, dc)) * mix(0.22, uNearGain, uSelf);
+    float I = base + energy * mix(1.0, uGain, uSelf) + near;
 
     vec3 V = normalize(uCamPos - vWorld);
     float fres = pow(1.0 - abs(dot(V, n)), 2.5);
-    vec3 col = uColor * (lines * I * 1.8 + I * 0.025 + fres * I * 0.22);
+    vec3 col = mix(vec3(0.169, 1.0, 0.478), uColor, uSelf) * (lines * I * 1.8 + I * 0.025 + fres * I * 0.22);
     gl_FragColor = vec4(col, 1.0);
   }`;
-function makeSonarMaterial({ base, gain, grid, near, color, bend = null }) {
+function makeSonarMaterial({ base, gain, grid, near, color }) {
   return new THREE.ShaderMaterial({
-    defines: bend ? { MAXR: CFG.MAX_RIPPLES, MONSTER_BEND: 1 } : { MAXR: CFG.MAX_RIPPLES },
+    defines: { MAXR: CFG.MAX_RIPPLES },
     uniforms: Object.assign({}, sonarShared, {
       uBase: { value: base }, uGain: { value: gain }, uGrid: { value: grid },
-      uNearGain: { value: near }, uColor: { value: new THREE.Color(color) },
-    }, bend ? { uArms: bend.uArms, uArmPivot: bend.uArmPivot } : {}),
+      uNearGain: { value: near }, uColor: { value: new THREE.Color(color) }, uSelf: { value: 1 },
+    }),
     vertexShader: SONAR_VERT,
     fragmentShader: SONAR_FRAG,
   });
@@ -355,7 +384,7 @@ function setViewMode(mode) {
   for (const e of swappables) e.mesh.material = mon ? e.m : e.s;
   for (const o of survivorOnly) o.visible = !mon;
   scene.fog = mon ? null : survivorFog;
-  scene.background = new THREE.Color(mon ? 0x000000 : 0x050605);
+  scene.background = new THREE.Color(mon ? 0x000000 : 0x101722);
   flashlight.visible = !mon && flashlightOn;
 }
 
@@ -432,154 +461,377 @@ function canvasTex(size, draw, rx = 1, ry = rx) {
   t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = renderer.capabilities.getMaxAnisotropy();
   return t;
 }
-function grime(g, s, rng, n, alpha) {
+function grime(g, s, rng, n, alpha, rgb = '20,16,10') {
   for (let i = 0; i < n; i++) {
     const x = rng() * s, y = rng() * s, r = rng() * s * 0.08 + 2;
     const grd = g.createRadialGradient(x, y, 0, x, y, r);
-    grd.addColorStop(0, `rgba(20,16,10,${alpha * rng()})`); grd.addColorStop(1, 'rgba(20,16,10,0)');
+    grd.addColorStop(0, `rgba(${rgb},${alpha * rng()})`); grd.addColorStop(1, `rgba(${rgb},0)`);
     g.fillStyle = grd; g.fillRect(x - r, y - r, r * 2, r * 2);
   }
 }
 function speck(g, s, rng, n) {
   for (let i = 0; i < n; i++) { const v = 40 + rng() * 60; g.fillStyle = `rgba(${v},${v},${v},${rng() * 0.25})`; g.fillRect(rng() * s, rng() * s, 1 + rng() * 2, 1 + rng() * 2); }
 }
+const GROUND = AREA + 120; // ground plane size (reaches well past the fence)
 const TEX = {
-  floor: canvasTex(512, (g, s, rng) => {
-    g.fillStyle = '#2d2e2a'; g.fillRect(0, 0, s, s);
-    const n = 4, t = s / n;
-    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-      const v = 52 + rng() * 18; g.fillStyle = `rgb(${v},${v - 2},${v - 6})`; g.fillRect(x * t + 2, y * t + 2, t - 4, t - 4);
+  ground: canvasTex(512, (g, s, rng) => {
+    g.fillStyle = '#26271b'; g.fillRect(0, 0, s, s);
+    grime(g, s, rng, 60, 0.5, '48,40,24');                       // soil patches
+    grime(g, s, rng, 40, 0.45, '34,48,24');                      // moss
+    for (let i = 0; i < 2600; i++) {                            // fallen needles and twigs
+      const x = rng() * s, y = rng() * s, a = rng() * Math.PI, l = 3 + rng() * 9, v = 60 + rng() * 50;
+      g.strokeStyle = `rgba(${v + 20},${v},${v * 0.55},${0.25 + rng() * 0.4})`; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
     }
-    speck(g, s, rng, 3000); grime(g, s, rng, 40, 0.6);
-  }, MW, MH),
-  wall: canvasTex(512, (g, s, rng) => {
-    g.fillStyle = '#6a685c'; g.fillRect(0, 0, s, s);
-    g.fillStyle = '#34463d'; g.fillRect(0, s * 0.62, s, s * 0.38);          // institutional green dado
-    g.fillStyle = '#23302a'; g.fillRect(0, s * 0.6, s, s * 0.03);
-    g.strokeStyle = 'rgba(0,0,0,0.25)'; g.lineWidth = 2;
-    for (let x = 0; x <= s; x += s / 4) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, s); g.stroke(); }
-    speck(g, s, rng, 2500);
-    for (let i = 0; i < 14; i++) {                                           // drip streaks
-      const x = rng() * s, len = rng() * s * 0.6;
-      const grd = g.createLinearGradient(0, 0, 0, len);
-      grd.addColorStop(0, 'rgba(40,30,15,0.5)'); grd.addColorStop(1, 'rgba(40,30,15,0)');
-      g.fillStyle = grd; g.fillRect(x, 0, 2 + rng() * 6, len);
-    }
-    grime(g, s, rng, 25, 0.5);
-    g.strokeStyle = 'rgba(15,10,5,0.6)'; g.lineWidth = 1;                   // cracks
-    for (let i = 0; i < 5; i++) { let x = rng() * s, y = rng() * s; g.beginPath(); g.moveTo(x, y); for (let k = 0; k < 8; k++) { x += (rng() - 0.5) * 30; y += rng() * 20; g.lineTo(x, y); } g.stroke(); }
+    for (let i = 0; i < 500; i++) { const v = 50 + rng() * 40; g.fillStyle = `rgba(${v * 0.7},${v},${v * 0.5},0.5)`; g.fillRect(rng() * s, rng() * s, 1, 2 + rng() * 4); } // grass blades
+  }, GROUND / 6),
+  path: canvasTex(256, (g, s, rng) => {
+    g.fillStyle = '#3d3424'; g.fillRect(0, 0, s, s);
+    grime(g, s, rng, 30, 0.6, '28,22,14'); speck(g, s, rng, 1500);
   }),
-  ceil: canvasTex(256, (g, s, rng) => {
-    g.fillStyle = '#26261f'; g.fillRect(0, 0, s, s);
-    g.strokeStyle = '#141410'; g.lineWidth = 3;
-    for (let i = 0; i <= s; i += s / 2) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, s); g.moveTo(0, i); g.lineTo(s, i); g.stroke(); }
-    speck(g, s, rng, 800); grime(g, s, rng, 12, 0.7);
-  }, MW, MH),
+  bark: canvasTex(256, (g, s, rng) => {
+    g.fillStyle = '#2e241b'; g.fillRect(0, 0, s, s);
+    for (let i = 0; i < 70; i++) { const x = rng() * s, v = 20 + rng() * 40; g.fillStyle = `rgba(${v + 15},${v + 8},${v},0.7)`; g.fillRect(x, 0, 1 + rng() * 4, s); }
+    for (let i = 0; i < 90; i++) { const v = 10 + rng() * 15; g.fillStyle = `rgba(${v},${v},${v},0.6)`; g.fillRect(rng() * s, rng() * s, 3 + rng() * 10, 1 + rng() * 3); }
+  }),
+  needles: canvasTex(256, (g, s, rng) => {
+    g.fillStyle = '#16231a'; g.fillRect(0, 0, s, s);
+    for (let i = 0; i < 3000; i++) {
+      const x = rng() * s, y = rng() * s, a = Math.PI / 2 + (rng() - 0.5) * 1.2, l = 4 + rng() * 6, v = 25 + rng() * 45;
+      g.strokeStyle = `rgba(${v * 0.6},${v},${v * 0.7},0.8)`; g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+    }
+  }),
+  logs: canvasTex(512, (g, s, rng) => {
+    const n = 8, h = s / n;
+    for (let i = 0; i < n; i++) {
+      const v = 70 + rng() * 25, grd = g.createLinearGradient(0, i * h, 0, (i + 1) * h);
+      grd.addColorStop(0, `rgb(${v * 0.45},${v * 0.33},${v * 0.22})`); grd.addColorStop(0.5, `rgb(${v},${v * 0.75},${v * 0.5})`); grd.addColorStop(1, `rgb(${v * 0.35},${v * 0.26},${v * 0.17})`);
+      g.fillStyle = grd; g.fillRect(0, i * h, s, h);
+      for (let k = 0; k < 40; k++) { g.fillStyle = `rgba(30,20,10,${rng() * 0.3})`; g.fillRect(rng() * s, i * h + rng() * h, 10 + rng() * 60, 1); }
+    }
+    grime(g, s, rng, 30, 0.5);
+  }),
+  roof: canvasTex(256, (g, s, rng) => {
+    g.fillStyle = '#2a2622'; g.fillRect(0, 0, s, s);
+    for (let y = 0; y < s; y += 16) for (let x = (y / 16) % 2 ? -12 : 0; x < s; x += 24) { const v = 35 + rng() * 25; g.fillStyle = `rgb(${v},${v * 0.92},${v * 0.85})`; g.fillRect(x + 1, y + 1, 22, 14); }
+    grime(g, s, rng, 25, 0.6, '30,40,20');
+  }),
+  planks: canvasTex(256, (g, s, rng) => {
+    for (let x = 0; x < s; x += 32) { const v = 60 + rng() * 25; g.fillStyle = `rgb(${v},${v * 0.72},${v * 0.48})`; g.fillRect(x, 0, 31, s); g.fillStyle = '#1b130b'; g.fillRect(x + 31, 0, 1, s); }
+    grime(g, s, rng, 25, 0.5); speck(g, s, rng, 600);
+  }),
+  rock: canvasTex(256, (g, s, rng) => {
+    g.fillStyle = '#4a4a46'; g.fillRect(0, 0, s, s);
+    grime(g, s, rng, 40, 0.6, '25,25,22'); grime(g, s, rng, 25, 0.5, '50,70,40'); speck(g, s, rng, 2000);
+  }),
   crate: canvasTex(256, (g, s, rng) => {
     g.fillStyle = '#5a4026'; g.fillRect(0, 0, s, s);
     for (let y = 0; y < s; y += s / 6) { const v = rng() * 20; g.fillStyle = `rgb(${90 + v},${62 + v},${36 + v})`; g.fillRect(4, y + 3, s - 8, s / 6 - 6); }
     g.strokeStyle = '#2b1d10'; g.lineWidth = 10; g.strokeRect(5, 5, s - 10, s - 10);
-    g.beginPath(); g.moveTo(10, 10); g.lineTo(s - 10, s - 10); g.stroke();
     speck(g, s, rng, 600);
   }),
   gate: canvasTex(256, (g, s, rng) => {
-    g.fillStyle = '#4b4f52'; g.fillRect(0, 0, s, s);
-    g.fillStyle = 'rgba(0,0,0,0.3)'; for (let y = 0; y < s; y += 16) g.fillRect(0, y, s, 3);
-    for (let i = -s; i < s * 2; i += 40) { g.fillStyle = '#c9a400'; g.beginPath(); g.moveTo(i, s * 0.82); g.lineTo(i + 20, s * 0.82); g.lineTo(i + 20 + 40, s); g.lineTo(i + 40, s); g.fill(); }
-    g.fillStyle = '#111'; g.fillRect(0, s * 0.8, s, 4);
-    grime(g, s, rng, 20, 0.7); speck(g, s, rng, 800);
+    g.fillStyle = 'rgba(0,0,0,0)'; g.clearRect(0, 0, s, s);
+    g.strokeStyle = '#8a8f92'; g.lineWidth = 2;
+    for (let i = -s; i < s * 2; i += 18) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i + s, s); g.moveTo(i + s, 0); g.lineTo(i, s); g.stroke(); } // chain link
+    g.fillStyle = '#6d7275'; g.fillRect(0, 0, s, 10); g.fillRect(0, s - 10, s, 10); g.fillRect(0, 0, 10, s); g.fillRect(s - 10, 0, 10, s);
+    for (let i = -s; i < s * 2; i += 40) { g.fillStyle = '#c9a400'; g.beginPath(); g.moveTo(i, s * 0.86); g.lineTo(i + 20, s * 0.86); g.lineTo(i + 40, s); g.lineTo(i + 20, s); g.fill(); }
   }),
 };
 
 // ----------------------------------------------------------------------------
 //  WORLD CONSTRUCTION
 // ----------------------------------------------------------------------------
-const world = { gens: [], gate: null, lamps: [], exitLight: null };
-function buildWorld() {
-  // Floor & ceiling
-  const floorMat = new THREE.MeshStandardMaterial({ map: TEX.floor, roughness: 0.85, metalness: 0.05 });
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(MW * TILE, MH * TILE), floorMat);
-  floor.rotation.x = -Math.PI / 2; floor.position.set((MW * TILE) / 2, 0, (MH * TILE) / 2); floor.receiveShadow = true;
-  scene.add(reg(floor));
-  const ceil = new THREE.Mesh(new THREE.PlaneGeometry(MW * TILE, MH * TILE), new THREE.MeshStandardMaterial({ map: TEX.ceil, roughness: 1 }));
-  ceil.rotation.x = Math.PI / 2; ceil.position.set((MW * TILE) / 2, WALL_H, (MH * TILE) / 2);
-  scene.add(reg(ceil));
+const world = { gens: [], gate: null, flickers: [], exitLight: null, fire: null };
+const MAT = {};
+function stdMat(opts) { return new THREE.MeshStandardMaterial(Object.assign({ roughness: 0.9, metalness: 0 }, opts)); }
+// Bucket static geometry into 30 m chunks so off-screen forest is frustum-culled.
+const chunks = new Map();
+function addToChunk(kind, geo, x, z) {
+  const k = kind + ':' + Math.floor(x / 30) + ',' + Math.floor(z / 30);
+  if (!chunks.has(k)) chunks.set(k, { kind, geos: [] });
+  chunks.get(k).geos.push(geo);
+}
+function flushChunks() {
+  for (const { kind, geos } of chunks.values()) {
+    const m = new THREE.Mesh(mergeGeometries(geos.map((g) => g.index ? g.toNonIndexed() : g)), MAT[kind]);
+    m.castShadow = kind !== 'bush'; m.receiveShadow = true;
+    scene.add(reg(m));
+  }
+  chunks.clear();
+}
+function distToSegment(px, pz, ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az, t = clamp(((px - ax) * dx + (pz - az) * dz) / (dx * dx + dz * dz || 1), 0, 1);
+  return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
+}
+function nearPath(x, z, m) { for (const p of PATHS) for (let i = 0; i < p.length - 1; i++) if (distToSegment(x, z, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1]) < m) return true; return false; }
+// Somewhere a tree/rock may not go: cabins, camp, generators, paths, gate and road.
+function keepClear(x, z, extra = 0) {
+  for (const c of CABINS) if (Math.abs(x - c.x) < c.w / 2 + 3 + extra && Math.abs(z - c.z) < c.d / 2 + 3 + extra) return true;
+  if (Math.hypot(x - CAMPFIRE.x, z - CAMPFIRE.z) < 10 + extra) return true;
+  if (Math.hypot(x - SPAWN_MON.x, z - SPAWN_MON.z) < 3) return true;
+  if (nearPath(x, z, 2.3 + extra)) return true;
+  if (Math.abs(x - GATE.x) < 7 && z > AREA - 12) return true;
+  if (x > EXIT_ZONE.minX - 3 && x < EXIT_ZONE.maxX + 3 && z > AREA - 4) return true;
+  if (Math.abs(x - FENCE) < 1.5 || Math.abs(x - (AREA - FENCE)) < 1.5 || Math.abs(z - FENCE) < 1.5 || Math.abs(z - (AREA - FENCE)) < 1.5) return true;
+  return false;
+}
 
-  // Walls (only those touching walkable space) merged into one draw call
-  const wallGeos = [], crateGeos = [];
-  const walkable = (c) => !'#'.includes(c);
-  for (let z = 0; z < MH; z++) for (let x = 0; x < MW; x++) {
-    const c = grid[z][x];
-    const p = tileCenter(x, z);
-    if (c === '#') {
-      if (![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => walkable(cell(x + dx, z + dz)))) continue;
-      const g = new THREE.BoxGeometry(TILE, WALL_H, TILE); g.translate(p.x, WALL_H / 2, p.z); wallGeos.push(g);
-    } else if (c === 'C') {
-      const g = new THREE.BoxGeometry(1.8, 1.8, 1.8); g.rotateY((x * 7 + z * 3) % 5 * 0.12); g.translate(p.x, 0.9, p.z); crateGeos.push(g);
-      if ((x + z) % 2 === 0) { const g2 = new THREE.BoxGeometry(1.1, 1.1, 1.1); g2.rotateY(0.6); g2.translate(p.x + 0.2, 2.35, p.z - 0.1); crateGeos.push(g2); }
+function buildTree(rng, x, z, inside) {
+  const h = 7 + rng() * 7, r = 0.18 + rng() * 0.22, dead = rng() < 0.08;
+  const trunk = new THREE.CylinderGeometry(r * 0.55, r, h, 7, 1); trunk.translate(x, h / 2, z);
+  addToChunk('bark', trunk, x, z);
+  if (!dead) {
+    const layers = 3 + Math.floor(rng() * 2), base = h * (0.25 + rng() * 0.1);
+    for (let i = 0; i < layers; i++) {
+      const t = i / layers, cr = (1.0 - t * 0.7) * (1.6 + rng() * 0.9), ch = (h - base) / layers * 1.9;
+      const cone = new THREE.ConeGeometry(cr, ch, 8, 1); cone.rotateY(rng() * 3); cone.translate(x, base + t * (h - base) + ch / 2, z);
+      addToChunk('needles', cone, x, z);
+    }
+  } else {
+    for (let i = 0; i < 3; i++) { // bare broken branches
+      const b = new THREE.CylinderGeometry(0.03, 0.06, 1.4 + rng(), 4); b.rotateZ(0.9 + rng() * 0.5); b.rotateY(rng() * 6.28); b.translate(x, h * (0.45 + i * 0.15), z);
+      addToChunk('bark', b, x, z);
     }
   }
-  const walls = new THREE.Mesh(mergeGeometries(wallGeos), new THREE.MeshStandardMaterial({ map: TEX.wall, roughness: 0.9 }));
-  walls.castShadow = walls.receiveShadow = true;
-  scene.add(reg(walls));
-  const crates = new THREE.Mesh(mergeGeometries(crateGeos), new THREE.MeshStandardMaterial({ map: TEX.crate, roughness: 0.8 }));
-  crates.castShadow = crates.receiveShadow = true;
-  scene.add(reg(crates));
+  if (inside) addCircle(x, z, r + 0.08, 'tree');
+}
 
-  // Generators
-  GEN_TILES.forEach((t, i) => {
-    const g = new THREE.Group();
-    const p = tileCenter(t.x, t.z); g.position.copy(p);
-    const metal = new THREE.MeshStandardMaterial({ color: 0x5b5e57, roughness: 0.55, metalness: 0.6 });
-    const body = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.0, 0.9), metal); body.position.y = 0.5;
-    const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 1.1, 14), new THREE.MeshStandardMaterial({ color: 0x7a2a1d, roughness: 0.6, metalness: 0.3 }));
-    tank.rotation.z = Math.PI / 2; tank.position.set(0, 1.2, 0);
-    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8), metal); pipe.position.set(0.5, 1.4, 0.3);
-    const lampMat = new THREE.MeshStandardMaterial({ color: 0x220000, emissive: 0xff2200, emissiveIntensity: 3 });
-    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), lampMat); lamp.position.set(0, 1.05, 0.46);
-    for (const m of [body, tank, pipe]) { m.castShadow = true; m.receiveShadow = true; }
-    g.add(body, tank, pipe, lamp);
-    reg(g, 'gen');
-    const light = new THREE.PointLight(0xff3010, 3, 7, 2); light.position.set(0, 1.4, 0.8); g.add(light); survivorOnly.push(light);
-    scene.add(g);
-    world.gens.push({ group: g, lampMat, light, pos: p, shake: 0 });
-  });
+function buildCabin(c, i) {
+  const H = 2.7, T = 0.3, DOOR = 1.6, x0 = c.x - c.w / 2, x1 = c.x + c.w / 2, z0 = c.z - c.d / 2, z1 = c.z + c.d / 2;
+  const g = new THREE.Group();
+  const walls = [];
+  // A wall along x (fixed z) or z (fixed x), with an optional door gap centred at `gap`.
+  const wallX = (z, a, b, gap) => {
+    const segs = gap == null ? [[a, b]] : [[a, gap - DOOR / 2], [gap + DOOR / 2, b]];
+    for (const [s0, s1] of segs) { if (s1 - s0 < 0.05) continue; walls.push([s0, z - T / 2, s1, z + T / 2]); }
+    if (gap != null) walls.push([gap - DOOR / 2, z - T / 2, gap + DOOR / 2, z + T / 2, 'lintel']);
+  };
+  const wallZ = (x, a, b, gap) => {
+    const segs = gap == null ? [[a, b]] : [[a, gap - DOOR / 2], [gap + DOOR / 2, b]];
+    for (const [s0, s1] of segs) { if (s1 - s0 < 0.05) continue; walls.push([x - T / 2, s0, x + T / 2, s1]); }
+    if (gap != null) walls.push([x - T / 2, gap - DOOR / 2, x + T / 2, gap + DOOR / 2, 'lintel']);
+  };
+  wallX(z0, x0, x1, c.door === 'north' ? c.x : null);
+  wallX(z1, x0, x1, c.door === 'south' ? c.x : null);
+  wallZ(x0, z0, z1, c.door === 'west' ? c.z : null);
+  wallZ(x1, z0, z1, c.door === 'east' ? c.z : null);
+  if (c.split) wallZ(c.x - 1, z0, z1, c.z + 0.6);          // interior wall (west of the front door) with a doorway
+  const wallGeos = [];
+  for (const [a, b, cc, d, kind] of walls) {
+    const lintel = kind === 'lintel', hh = lintel ? H - 2.1 : H;
+    const geo = new THREE.BoxGeometry(cc - a, hh, d - b);
+    geo.translate((a + cc) / 2, lintel ? 2.1 + hh / 2 : hh / 2, (b + d) / 2);
+    wallGeos.push(geo);
+    if (!lintel) addBox(a, b, cc, d, 'wall');
+  }
+  const wallMesh = new THREE.Mesh(mergeGeometries(wallGeos), stdMat({ map: TEX.logs }));
+  wallMesh.castShadow = wallMesh.receiveShadow = true;
+  g.add(wallMesh);
+  // Floor, gable roof and gable ends
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(c.w, 0.12, c.d), stdMat({ map: TEX.planks })); floor.position.set(c.x, 0.06, c.z); floor.receiveShadow = true;
+  g.add(floor);
+  const ridgeH = 1.6, over = 0.5, slope = Math.hypot(c.d / 2 + over, ridgeH);
+  const roofMat = stdMat({ map: TEX.roof, side: THREE.DoubleSide });
+  for (const s of [-1, 1]) {
+    const r = new THREE.Mesh(new THREE.BoxGeometry(c.w + over * 2, 0.12, slope), roofMat);
+    r.position.set(c.x, H + ridgeH / 2, c.z + s * (c.d / 4 + over / 2)); r.rotation.x = s * Math.atan2(ridgeH, c.d / 2 + over);
+    r.castShadow = true; g.add(r);
+  }
+  const gable = new THREE.Shape([new THREE.Vector2(-c.d / 2, 0), new THREE.Vector2(c.d / 2, 0), new THREE.Vector2(0, ridgeH)]);
+  for (const s of [-1, 1]) {
+    const ge = new THREE.Mesh(new THREE.ShapeGeometry(gable), stdMat({ map: TEX.logs, side: THREE.DoubleSide }));
+    ge.rotation.y = Math.PI / 2; ge.position.set(c.x + s * c.w / 2, H, c.z); g.add(ge);
+  }
+  // Glowing windows on the long walls and a warm lamp inside
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x1a1006, emissive: 0xffa040, emissiveIntensity: 1.6 });
+  for (const s of [-1, 1]) for (const fx of [-0.28, 0.28]) {
+    if (c.door === (s < 0 ? 'north' : 'south') && Math.abs(fx) < 0.1) continue;
+    const win = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.6), winMat);
+    win.position.set(c.x + fx * c.w, 1.5, c.z + s * (c.d / 2 + T / 2 + 0.01)); win.rotation.y = s < 0 ? Math.PI : 0;
+    g.add(win);
+  }
+  const lamp = new THREE.PointLight(0xffa860, 6, 9, 1.6); lamp.position.set(c.x + (c.split ? -c.w / 4 - 0.3 : 0), 2.2, c.z);
+  g.add(lamp); survivorOnly.push(lamp);
+  world.flickers.push({ light: lamp, base: 6, phase: i * 13.7, kind: 'lamp' });
+  // Furniture (colliders too)
+  const furn = [];
+  if (c.split) { furn.push([c.x + 2.5, c.z - 2.2, 1.6, 0.8, 0.8]); furn.push([c.x + 3.6, c.z + 2.4, 1.0, 0.6, 1.9]); }
+  else if (c.w > 6) furn.push([c.x - 2.2, c.z - 2.0, 1.2, 0.8, 0.8]);
+  for (const [fx, fz, fw, fh, fd] of furn) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, fd), stdMat({ map: TEX.crate })); m.position.set(fx, fh / 2, fz); m.castShadow = true;
+    g.add(m); addBox(fx - fw / 2, fz - fd / 2, fx + fw / 2, fz + fd / 2, 'furniture');
+  }
+  scene.add(reg(g));
+}
 
-  // Exit gate + escape zone
-  const gp = tileCenter(GATE_TILE.x, GATE_TILE.z);
-  const gate = new THREE.Mesh(new THREE.BoxGeometry(TILE, WALL_H, TILE * 0.5), new THREE.MeshStandardMaterial({ map: TEX.gate, roughness: 0.5, metalness: 0.7 }));
-  gate.position.set(gp.x, WALL_H / 2, gp.z); gate.castShadow = true;
-  scene.add(reg(gate)); world.gate = gate;
+function buildGenerator(i) {
+  const G = GENS[i];
+  const g = new THREE.Group();
+  g.position.set(G.x, 0, G.z); g.rotation.y = G.ry;
+  const metal = stdMat({ color: 0x5b5e57, roughness: 0.55, metalness: 0.6 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.0, 0.9), metal); body.position.y = 0.5;
+  const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 1.1, 14), stdMat({ color: 0x7a2a1d, roughness: 0.6, metalness: 0.3 }));
+  tank.rotation.z = Math.PI / 2; tank.position.set(0, 1.2, 0);
+  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.0, 8), metal); pipe.position.set(0.5, 1.4, 0.3);
+  const lampMat = new THREE.MeshStandardMaterial({ color: 0x220000, emissive: 0xff2200, emissiveIntensity: 3 });
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), lampMat); lamp.position.set(0, 1.05, 0.46);
+  for (const m of [body, tank, pipe]) { m.castShadow = true; m.receiveShadow = true; }
+  g.add(body, tank, pipe, lamp);
+  reg(g, 'gen');
+  const light = new THREE.PointLight(0xff3010, 3, 7, 2); light.position.set(0, 1.4, 0.8); g.add(light); survivorOnly.push(light);
+  scene.add(g);
+  // Footprint: 1.3 x 0.9 m, rotated with the generator
+  const hx = Math.abs(Math.cos(G.ry)) * 0.65 + Math.abs(Math.sin(G.ry)) * 0.45, hz = Math.abs(Math.sin(G.ry)) * 0.65 + Math.abs(Math.cos(G.ry)) * 0.45;
+  addBox(G.x - hx, G.z - hz, G.x + hx, G.z + hz, 'gen');
+  world.gens.push({ group: g, lampMat, light, pos: genPos(i), shake: 0 });
+}
+
+function buildWorld() {
+  const rng = mulberry32(1337);
+  MAT.bark = stdMat({ map: TEX.bark });
+  MAT.needles = stdMat({ map: TEX.needles, color: 0x9fb39f });
+  MAT.rock = stdMat({ map: TEX.rock, roughness: 0.95 });
+  MAT.bush = stdMat({ map: TEX.needles, color: 0x6f8a62 });
+  MAT.fence = stdMat({ map: TEX.planks, color: 0x8a8070 });
+
+  // Ground and dirt paths
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND, GROUND), stdMat({ map: TEX.ground, roughness: 1 }));
+  ground.rotation.x = -Math.PI / 2; ground.position.set(AREA / 2, 0, AREA / 2); ground.receiveShadow = true;
+  scene.add(reg(ground));
+  const pathMat = stdMat({ map: TEX.path, polygonOffset: true, polygonOffsetFactor: -2 });
+  for (const p of PATHS) for (let i = 0; i < p.length - 1; i++) {
+    const [ax, az] = p[i], [bx, bz] = p[i + 1], len = Math.hypot(bx - ax, bz - az);
+    const seg = new THREE.Mesh(new THREE.PlaneGeometry(2.6, len + 2.4), pathMat);
+    seg.rotation.x = -Math.PI / 2; seg.rotation.z = -Math.atan2(bx - ax, bz - az);
+    seg.position.set((ax + bx) / 2, 0.012 + i * 0.001, (az + bz) / 2); seg.receiveShadow = true;
+    scene.add(reg(seg));
+  }
+
+  // Cabins and generators
+  CABINS.forEach(buildCabin);
+  GENS.forEach((_, i) => buildGenerator(i));
+
+  // Campfire: stone ring, logs, flickering flames and light
+  const fire = new THREE.Group(); fire.position.set(CAMPFIRE.x, 0, CAMPFIRE.z);
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2, st = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22, 0), MAT.rock);
+    st.position.set(Math.cos(a) * 0.75, 0.12, Math.sin(a) * 0.75); st.rotation.set(rng() * 3, rng() * 3, 0); fire.add(st);
+  }
+  for (let i = 0; i < 3; i++) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.1, 6), MAT.bark); l.rotation.set(Math.PI / 2, 0, i * 1.05); l.position.y = 0.12; fire.add(l); }
+  const flameMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.85, toneMapped: false });
+  const flames = [];
+  for (let i = 0; i < 4; i++) { const f = new THREE.Mesh(new THREE.ConeGeometry(0.22 - i * 0.03, 0.8 - i * 0.1, 6), flameMat); f.position.set((rng() - 0.5) * 0.25, 0.45, (rng() - 0.5) * 0.25); fire.add(f); flames.push(f); survivorOnly.push(f); }
+  const fireLight = new THREE.PointLight(0xff8a3a, 14, 16, 1.6); fireLight.position.y = 1.0; fire.add(fireLight); survivorOnly.push(fireLight);
+  // Logs to sit on
+  for (const a of [0.4, 2.3, 4.2]) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.8, 8), MAT.bark); l.rotation.set(0, -a, Math.PI / 2); l.position.set(Math.cos(a) * 2.6, 0.22, Math.sin(a) * 2.6); l.castShadow = true; fire.add(l); }
+  scene.add(reg(fire));
+  addCircle(CAMPFIRE.x, CAMPFIRE.z, 0.95, 'fire');
+  world.fire = { flames, light: fireLight };
+  world.flickers.push({ light: fireLight, base: 14, phase: 0, kind: 'fire' });
+
+  // Fence with the gate gap, and the road out
+  const fenceGeos = [];
+  const side = (x0, z0, x1, z1) => {
+    const len = Math.hypot(x1 - x0, z1 - z0), n = Math.max(1, Math.round(len / 3));
+    for (let i = 0; i <= n; i++) { const t = i / n, post = new THREE.BoxGeometry(0.18, 1.8, 0.18); post.translate(lerp(x0, x1, t), 0.9, lerp(z0, z1, t)); fenceGeos.push(post); }
+    for (const y of [0.55, 1.2, 1.7]) { const rail = new THREE.BoxGeometry(Math.abs(x1 - x0) + 0.1 || 0.08, 0.1, Math.abs(z1 - z0) + 0.1 || 0.08); rail.translate((x0 + x1) / 2, y, (z0 + z1) / 2); fenceGeos.push(rail); }
+    addBox(Math.min(x0, x1) - 0.15, Math.min(z0, z1) - 0.15, Math.max(x0, x1) + 0.15, Math.max(z0, z1) + 0.15, 'fence');
+  };
+  const F0 = FENCE, F1 = AREA - FENCE, gx0 = GATE.x - GATE.w / 2, gx1 = GATE.x + GATE.w / 2;
+  side(F0, F0, F1, F0); side(F0, F0, F0, F1); side(F1, F0, F1, F1);
+  side(F0, F1, gx0, F1); side(gx1, F1, F1, F1);
+  // Road walls (dense brush either side of the road)
+  side(EXIT_ZONE.minX - 0.2, F1, EXIT_ZONE.minX - 0.2, EXIT_ZONE.maxZ); side(EXIT_ZONE.maxX + 0.2, F1, EXIT_ZONE.maxX + 0.2, EXIT_ZONE.maxZ);
+  side(EXIT_ZONE.minX - 0.2, EXIT_ZONE.maxZ, EXIT_ZONE.maxX + 0.2, EXIT_ZONE.maxZ);
+  const fence = new THREE.Mesh(mergeGeometries(fenceGeos), MAT.fence); fence.castShadow = fence.receiveShadow = true;
+  scene.add(reg(fence));
+  // Sliding chain-link gate
+  const gateMat = new THREE.MeshStandardMaterial({ map: TEX.gate, transparent: true, alphaTest: 0.3, side: THREE.DoubleSide, metalness: 0.6, roughness: 0.5 });
+  const gate = new THREE.Mesh(new THREE.PlaneGeometry(GATE.w, 2.2), gateMat);
+  gate.position.set(GATE.x, 1.1, F1); gate.castShadow = true;
+  scene.add(reg(gate, 'gen'));
+  addBox(gx0, F1 - 0.15, gx1, F1 + 0.15, 'gate');
+  world.gate = { mesh: gate, x0: GATE.x };
   const signTex = canvasTex(256, (g, s) => {
     g.fillStyle = '#062a12'; g.fillRect(0, 0, s, s / 2);
     g.fillStyle = '#39ff8a'; g.font = 'bold 72px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('EXIT', s / 2, s / 4);
   });
   signTex.repeat.set(1, 2);
-  const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.35), new THREE.MeshBasicMaterial({ map: signTex, toneMapped: false }));
-  sign.position.set(gp.x, WALL_H - 0.35, gp.z - TILE / 2 - 0.25);
-  sign.lookAt(gp.x, WALL_H - 0.35, gp.z - TILE * 2);
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.35), new THREE.MeshBasicMaterial({ map: signTex, toneMapped: false, side: THREE.DoubleSide }));
+  sign.position.set(GATE.x, 2.6, F1 - 0.05); sign.rotation.y = Math.PI;
   scene.add(reg(sign, 'gen'));
-  const exitLight = new THREE.PointLight(0x2cff70, 4, 10, 2); exitLight.position.set(gp.x, WALL_H - 0.6, gp.z - TILE * 0.7);
+  for (const s of [-1, 1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.9, 0.25), MAT.fence); post.position.set(GATE.x + s * (GATE.w / 2 + 0.15), 1.45, F1); scene.add(reg(post)); }
+  const exitLight = new THREE.PointLight(0x2cff70, 5, 12, 1.8); exitLight.position.set(GATE.x, 2.4, F1 - 1.2);
   scene.add(exitLight); survivorOnly.push(exitLight); world.exitLight = exitLight;
 
-  // Ceiling lamps (fixture meshes + a capped number of real point lights)
-  const fixtureMat = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0xfff1c4, emissiveIntensity: 2.5 });
-  let lightsPlaced = 0;
-  const rng = mulberry32(42);
-  for (const t of FLOOR_TILES) {
-    if (!((t.x % 5 === 2 && t.z % 4 === 1) || (t.x % 6 === 4 && t.z % 5 === 3))) continue;
-    const p = tileCenter(t.x, t.z);
-    const fx = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.25), fixtureMat.clone());
-    fx.position.set(p.x, WALL_H - 0.04, p.z); scene.add(reg(fx, 'env'));
-    let light = null;
-    if (lightsPlaced < 7) {
-      light = new THREE.PointLight(0xffe2b0, 30, 18, 1.5); light.position.set(p.x, WALL_H - 0.3, p.z);
-      scene.add(light); survivorOnly.push(light); lightsPlaced++;
-    }
-    world.lamps.push({ fx, light, base: light ? light.intensity : 0, phase: rng() * 100, bad: rng() < 0.4, dead: false });
+  // Trees: blue-noise scatter inside the fence (with colliders) and a dense wall outside it.
+  const treeGrid = new Map(), cellOf = (x, z) => Math.floor(x / 3) + ',' + Math.floor(z / 3);
+  const tooClose = (x, z, md) => {
+    const cx = Math.floor(x / 3), cz = Math.floor(z / 3);
+    for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) for (const t of treeGrid.get((cx + dx) + ',' + (cz + dz)) || []) if (Math.hypot(t[0] - x, t[1] - z) < md) return true;
+    return false;
+  };
+  const plant = (x, z, inside) => { const k = cellOf(x, z); if (!treeGrid.has(k)) treeGrid.set(k, []); treeGrid.get(k).push([x, z]); buildTree(rng, x, z, inside); };
+  for (let i = 0; i < 9000; i++) {
+    const x = FENCE + 1 + rng() * (AREA - FENCE * 2 - 2), z = FENCE + 1 + rng() * (AREA - FENCE * 2 - 2);
+    if (keepClear(x, z) || tooClose(x, z, 4.2)) continue;
+    plant(x, z, true);
   }
+  for (let i = 0; i < 5000; i++) {
+    const x = -35 + rng() * (AREA + 70), z = -35 + rng() * (AREA + 70);
+    const outside = x < FENCE - 1.5 || x > AREA - FENCE + 1.5 || z < FENCE - 1.5 || z > AREA - FENCE + 1.5;
+    if (!outside || (x > EXIT_ZONE.minX - 2 && x < EXIT_ZONE.maxX + 2 && z > AREA - 6) || tooClose(x, z, 3.2)) continue;
+    plant(x, z, false);
+  }
+  // Rocks and fallen logs (solid), bushes (cover, not solid)
+  for (let i = 0, n = 0; i < 400 && n < 28; i++) {
+    const x = 6 + rng() * (AREA - 12), z = 6 + rng() * (AREA - 12);
+    if (keepClear(x, z) || tooClose(x, z, 2.5)) continue;
+    const r = 0.5 + rng() * 0.9, geo = new THREE.DodecahedronGeometry(r, 0);
+    geo.scale(1, 0.55 + rng() * 0.3, 1); geo.rotateY(rng() * 6); geo.translate(x, r * 0.3, z);
+    addToChunk('rock', geo, x, z); addCircle(x, z, r * 0.95, 'rock'); n++;
+  }
+  for (let i = 0, n = 0; i < 400 && n < 14; i++) {
+    const x = 6 + rng() * (AREA - 12), z = 6 + rng() * (AREA - 12), a = rng() * Math.PI, len = 4 + rng() * 4;
+    const ex = Math.cos(a) * len / 2, ez = Math.sin(a) * len / 2;
+    if (keepClear(x, z) || keepClear(x + ex, z + ez) || keepClear(x - ex, z - ez) || tooClose(x, z, 3)) continue;
+    const geo = new THREE.CylinderGeometry(0.3, 0.38, len, 8); geo.rotateZ(Math.PI / 2); geo.rotateY(-a); geo.translate(x, 0.33, z);
+    addToChunk('bark', geo, x, z);
+    for (const t of [-0.4, 0, 0.4]) addCircle(x + Math.cos(a) * len * t, z + Math.sin(a) * len * t, 0.42, 'log');
+    n++;
+  }
+  for (let i = 0, n = 0; i < 2000 && n < 160; i++) {
+    const x = 4 + rng() * (AREA - 8), z = 4 + rng() * (AREA - 8);
+    if (keepClear(x, z, -1.5)) continue;
+    for (let k = 0; k < 3; k++) {
+      const r = 0.45 + rng() * 0.4, geo = new THREE.IcosahedronGeometry(r, 0);
+      geo.scale(1.2, 0.75, 1.2); geo.translate(x + (rng() - 0.5) * 1.2, r * 0.55, z + (rng() - 0.5) * 1.2);
+      addToChunk('bush', geo, x, z);
+    }
+    n++;
+  }
+  flushChunks();
 
-  scene.add(new THREE.HemisphereLight(0x8a96a0, 0x3a2e1e, 2.6));
+  // Night sky: stars and a hazy moon (survivor view only)
+  const starPos = [];
+  for (let i = 0; i < 1500; i++) {
+    const u = rng() * Math.PI * 2, v = Math.acos(0.15 + rng() * 0.85), R = 180;
+    starPos.push(AREA / 2 + R * Math.sin(v) * Math.cos(u), R * Math.cos(v), AREA / 2 + R * Math.sin(v) * Math.sin(u));
+  }
+  const starGeo = new THREE.BufferGeometry(); starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+  const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xcfd8ff, size: 0.9, sizeAttenuation: false, fog: false }));
+  scene.add(stars); survivorOnly.push(stars);
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(6, 20, 16), new THREE.MeshBasicMaterial({ color: 0xdfe6ff, fog: false }));
+  moon.position.set(AREA / 2 - 90, 110, AREA / 2 - 120); scene.add(moon); survivorOnly.push(moon);
+
+  // Moonlight + sky/ground ambient
+  const moonLight = new THREE.DirectionalLight(0xa9bde0, 1.6); moonLight.position.set(-60, 100, -80); moonLight.target.position.set(AREA / 2, 0, AREA / 2);
+  scene.add(moonLight, moonLight.target); survivorOnly.push(moonLight);
+  scene.add(new THREE.HemisphereLight(0x6a7ea6, 0x2a2216, 2.4));
+
+  buildNav();
+  for (let z = 0; z < NAV_H; z++) for (let x = 0; x < NAV_W; x++) if (navBlocked[navIdx(x, z)] === 0 && z < (AREA - FENCE) * NAV_RES) NAV_FREE.push({ x, z });
 }
 
 // Flashlight (survivor only)
@@ -671,17 +923,188 @@ async function prepSurvivorAsset(gltf) {
   }
   return { template, walk, idle };
 }
+const MONSTER_H = 2.13; // 7 ft
 function prepMonsterAsset(gltf) {
-  const pv = gltf.scene.userData.armPivot || [0, 0, 0];
-  const pivot = new THREE.Vector3(pv[0], pv[1], pv[2]);
+  let hips = null;
   gltf.scene.traverse((o) => {
+    if (o.isBone && o.name === 'Hips') hips = o;
     if (!o.isMesh) return;
-    o.castShadow = true;
+    o.castShadow = true; o.frustumCulled = false; // skinned: bounds don't follow the pose
     o.material.side = THREE.FrontSide;
-    if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
   });
-  return { template: normalizeModel(gltf.scene, 2.7, Math.PI), pivot };
+  if (!hips) throw new Error('monster.glb has no Hips bone (rebuild it with tools/optimize-monster.mjs)');
+  const clips = buildMonsterClips(hips.position.clone());
+  return { template: normalizeModel(gltf.scene, MONSTER_H, Math.PI), clips };
 }
+// ---- Wendigo animation ------------------------------------------------------------
+// The rig (tools/optimize-monster.mjs) rests in a T-pose with identity bone rotations,
+// +Y up, +Z forward, +X the creature's left. Clips are sampled from pose functions:
+// each returns Euler XYZ angles per bone (radians) plus a Hips offset in metres.
+//   spine/neck/head: +x leans forward, y turns, z tilts
+//   arms: `lower` drops the arm from the T-pose, `fwd` swings it forward/up,
+//         `elbow`/`curl` bend the forearm/claws forward
+//   legs: thigh -x swings forward, knee +x bends, foot +x points the toes down
+const SIDES = [['L', 1], ['R', -1]];
+function basePose() {
+  const p = { Hips: [0, 0, 0], Spine: [0.22, 0, 0], Chest: [0.18, 0, 0], Neck: [-0.12, 0, 0], Head: [-0.1, 0, 0], hips: [0, -0.06, 0] };
+  for (const [S] of SIDES) { p['Clavicle' + S] = [0, 0, 0]; p['Toe' + S] = [0, 0, 0]; }
+  setArm(p, 'L', {}); setArm(p, 'R', {}); setLeg(p, 'L', {}); setLeg(p, 'R', {});
+  return p;
+}
+function setArm(p, S, { lower = 1.3, fwd = 0.25, elbow = 0.35, curl = 0.3, twist = 0 } = {}) {
+  const s = S === 'L' ? 1 : -1;
+  p['UpperArm' + S] = [-fwd, twist * s, -s * lower];
+  p['Forearm' + S] = [0, -s * elbow, 0];
+  p['Hand' + S] = [0, -s * curl * 0.4, 0];
+  p['Claws' + S] = [0, -s * curl, 0];
+}
+function setLeg(p, S, { thigh = -0.22, knee = 0.42, foot = -0.18, splay = 0 } = {}) {
+  const s = S === 'L' ? 1 : -1;
+  p['UpLeg' + S] = [thigh, 0, s * splay];
+  p['Leg' + S] = [knee, 0, 0];
+  p['Foot' + S] = [foot, 0, 0];
+}
+const TAU = Math.PI * 2;
+function gaitPose(t, T, k) {
+  // k: 0 = walk, 1 = run. One stride per T seconds; legs in antiphase.
+  const p = basePose(), ph = (t / T) * TAU;
+  p.Spine[0] = lerp(0.3, 0.62, k); p.Chest[0] = lerp(0.18, 0.3, k); p.Neck[0] = lerp(-0.2, -0.45, k);
+  p.Spine[1] = Math.sin(ph) * lerp(0.12, 0.2, k); p.Chest[1] = -Math.sin(ph) * lerp(0.08, 0.14, k);
+  p.Head[2] = Math.sin(ph) * 0.05;
+  for (const [S, s] of SIDES) {
+    const q = ph + (s > 0 ? 0 : Math.PI), sw = Math.sin(q);
+    setLeg(p, S, {
+      thigh: -0.25 - sw * lerp(0.5, 0.95, k),
+      knee: lerp(0.35, 0.55, k) + Math.max(0, Math.cos(q)) * lerp(0.8, 1.5, k),
+      foot: -0.15 + sw * 0.3,
+    });
+    setArm(p, S, { lower: lerp(1.25, 1.1, k), fwd: lerp(0.3, 0.75, k) + sw * lerp(0.45, 0.8, k), elbow: lerp(0.4, 0.8, k), curl: 0.35 });
+  }
+  p.hips = [0, lerp(-0.08, -0.16, k) + Math.cos(ph * 2) * lerp(0.035, 0.07, k), 0];
+  return p;
+}
+function idlePose(t) {
+  const p = basePose(), b = Math.sin((t / 3.2) * TAU);
+  p.Chest[0] += b * 0.04; p.Spine[0] += b * 0.02;
+  // Slow head sweep with a sudden twitch, like it's listening.
+  p.Head[1] = Math.sin((t / 3.2) * TAU) * 0.3; p.Head[2] = t > 1.9 && t < 2.2 ? 0.35 : 0.05;
+  for (const [S, s] of SIDES) setArm(p, S, { fwd: 0.25 + b * 0.05 * s, curl: 0.3 + Math.sin(t * 3 + s) * 0.15 });
+  p.hips[1] = -0.06 + b * 0.01;
+  return p;
+}
+function stalkPose(t) {
+  // Low crouch, head craned forward and tilting side to side, claws near the ground.
+  const p = basePose(), w = Math.sin((t / 2.6) * TAU);
+  p.Spine[0] = 0.75; p.Chest[0] = 0.3; p.Neck[0] = -0.6; p.Head[0] = -0.15; p.Head[2] = w * 0.4; p.Head[1] = Math.sin((t / 2.6) * TAU * 0.5) * 0.25;
+  for (const [S, s] of SIDES) {
+    setLeg(p, S, { thigh: -1.05, knee: 1.75, foot: -0.6, splay: 0.12 });
+    setArm(p, S, { lower: 1.15, fwd: 0.85 + w * 0.06 * s, elbow: 0.7, curl: 0.55 + Math.sin(t * 5 + s * 2) * 0.12 });
+  }
+  p.hips = [0, -0.5, -0.05];
+  return p;
+}
+function swipePose(t, side) {
+  // Wind up overhead, rake down and across, recover. 0.6 s.
+  const p = gaitPose(0, 1, 0), S = side > 0 ? 'L' : 'R';
+  const up = smooth01(t / 0.2), down = smooth01((t - 0.2) / 0.16), back = smooth01((t - 0.38) / 0.22);
+  const fwd = lerp(lerp(0.3, 2.6, up), 0.5, down), lower = lerp(lerp(1.25, 0.7, up), 1.3, down);
+  const a = { fwd: lerp(fwd, 0.3, back), lower: lerp(lower, 1.25, back), elbow: lerp(lerp(0.4, 0.9, up), 0.1, down), curl: lerp(0.3, -0.25, up) };
+  setArm(p, S, a);
+  p.Chest[1] = side * (lerp(0.35 * up, -0.45, down) * (1 - back));
+  p.Spine[0] = 0.3 + 0.35 * down * (1 - back);
+  p.hips[2] = 0.25 * down * (1 - back);
+  return p;
+}
+function killPose(t) {
+  // Rear up with claws raised (0-0.45), slam down and lunge (0.45-0.7), hold, recover (1.25-1.7).
+  const p = basePose();
+  const up = smooth01(t / 0.45), slam = smooth01((t - 0.45) / 0.25), rec = smooth01((t - 1.25) / 0.45);
+  const shake = t > 0.7 && t < 1.25 ? Math.sin(t * 60) * 0.03 : 0;
+  p.Spine[0] = lerp(lerp(0.22, -0.25, up), 0.95, slam) * (1 - rec) + 0.22 * rec;
+  p.Chest[0] = lerp(lerp(0.18, -0.1, up), 0.3, slam);
+  p.Neck[0] = lerp(lerp(-0.12, -0.7, up), -0.3, slam) + shake;
+  p.Head[0] = lerp(-0.1, -0.35, up);
+  for (const [S] of SIDES) {
+    setArm(p, S, {
+      fwd: lerp(lerp(0.25, 2.7, up), 0.35, slam) * (1 - rec) + 0.25 * rec,
+      lower: lerp(lerp(1.3, 0.55, up), 1.2, slam), elbow: lerp(lerp(0.35, 0.6, up), 0.15, slam), curl: lerp(lerp(0.3, -0.35, up), 0.7, slam),
+    });
+    setLeg(p, S, { thigh: lerp(-0.22, -0.95, slam) * (1 - rec) - 0.22 * rec, knee: lerp(0.42, 1.25, slam) * (1 - rec) + 0.42 * rec, foot: lerp(-0.18, -0.45, slam) });
+  }
+  p.hips = [0, lerp(lerp(-0.06, 0.06, up), -0.38, slam) * (1 - rec) - 0.06 * rec, lerp(0, 0.5, slam) * (1 - rec)];
+  return p;
+}
+function shriekPose(t) {
+  // Head thrown back, chest arched, arms flung wide and shaking. 1.3 s.
+  const p = basePose(), a = smooth01(t / 0.3) * (1 - smooth01((t - 0.95) / 0.35)), sh = Math.sin(t * 55) * 0.05 * a;
+  p.Spine[0] = lerp(0.22, -0.2, a); p.Chest[0] = lerp(0.18, -0.35, a); p.Neck[0] = lerp(-0.12, -0.75, a) + sh; p.Head[0] = lerp(-0.1, -0.35, a); p.Head[2] = sh * 2;
+  for (const [S] of SIDES) setArm(p, S, { lower: lerp(1.3, 0.35, a), fwd: lerp(0.25, -0.35, a), elbow: lerp(0.35, 0.15, a), curl: lerp(0.3, -0.45, a) + sh });
+  return p;
+}
+function smooth01(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+// Sample a pose function into an AnimationClip (quaternion tracks + Hips position).
+function poseClip(name, duration, fn, restHips, fps = 30) {
+  const n = Math.max(2, Math.round(duration * fps) + 1), times = [], poses = [];
+  for (let i = 0; i < n; i++) { const t = (i / (n - 1)) * duration; times.push(t); poses.push(fn(t)); }
+  const tracks = [], e = new THREE.Euler(), q = new THREE.Quaternion();
+  for (const bone of Object.keys(poses[0])) {
+    if (bone === 'hips') continue;
+    const vals = [];
+    for (const p of poses) { const a = p[bone]; q.setFromEuler(e.set(a[0], a[1], a[2], 'XYZ')); vals.push(q.x, q.y, q.z, q.w); }
+    tracks.push(new THREE.QuaternionKeyframeTrack(bone + '.quaternion', times, vals));
+  }
+  const hv = [];
+  for (const p of poses) hv.push(restHips.x + p.hips[0], restHips.y + p.hips[1], restHips.z + p.hips[2]);
+  tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, hv));
+  return new THREE.AnimationClip(name, duration, tracks);
+}
+function buildMonsterClips(restHips) {
+  return {
+    idle: poseClip('idle', 3.2, idlePose, restHips),
+    walk: poseClip('walk', 1.1, (t) => gaitPose(t, 1.1, 0), restHips),
+    run: poseClip('run', 0.72, (t) => gaitPose(t, 0.72, 1), restHips),
+    stalk: poseClip('stalk', 2.6, stalkPose, restHips),
+    swipeL: poseClip('swipeL', 0.6, (t) => swipePose(t, 1), restHips),
+    swipeR: poseClip('swipeR', 0.6, (t) => swipePose(t, -1), restHips),
+    kill: poseClip('kill', 1.7, killPose, restHips),
+    shriek: poseClip('shriek', 1.3, shriekPose, restHips),
+  };
+}
+// Per-avatar controller: locomotion loops blended by speed/stillness, one-shots on top.
+function makeMonsterAnimator(model) {
+  const mixer = new THREE.AnimationMixer(model);
+  const C = ASSETS.monster.clips, act = {};
+  for (const [k, clip] of Object.entries(C)) {
+    const a = mixer.clipAction(clip); act[k] = a;
+    if (['idle', 'walk', 'run', 'stalk'].includes(k)) { a.play(); a.setEffectiveWeight(k === 'idle' ? 1 : 0); }
+    else { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; }
+  }
+  const st = { mixer, act, w: { idle: 1, walk: 0, run: 0, stalk: 0 }, shot: null, shotT: 0, shotW: 0, swipeSide: 1 };
+  st.play = (name) => {
+    if (name === 'swipe') { st.swipeSide = -st.swipeSide; name = st.swipeSide > 0 ? 'swipeL' : 'swipeR'; }
+    if (st.shot && st.shot !== name) act[st.shot].stop();
+    st.shot = name; st.shotT = 0; act[name].reset().play();
+  };
+  st.busy = () => !!st.shot;
+  st.update = (dt, speed, still) => {
+    const run = clamp((speed - 4.9) / 1.0, 0, 1), move = clamp(speed / 1.2, 0, 1);
+    const tgt = { run: run * move, walk: (1 - run) * move, stalk: still * (1 - move), idle: (1 - still) * (1 - move) };
+    for (const k in tgt) st.w[k] = damp(st.w[k], tgt[k], 8, dt);
+    act.walk.timeScale = clamp(speed / 3.6, 0.5, 1.6); act.run.timeScale = clamp(speed / 6.0, 0.8, 1.4);
+    if (st.shot) {
+      st.shotT += dt;
+      const dur = C[st.shot].duration;
+      st.shotW = smooth01(st.shotT / 0.08) * (1 - smooth01((st.shotT - (dur - 0.15)) / 0.15));
+      if (st.shotT >= dur) { act[st.shot].stop(); st.shot = null; st.shotW = 0; }
+    }
+    const loco = 1 - st.shotW, sum = st.w.idle + st.w.walk + st.w.run + st.w.stalk || 1;
+    for (const k of ['idle', 'walk', 'run', 'stalk']) act[k].setEffectiveWeight((st.w[k] / sum) * loco);
+    if (st.shot) act[st.shot].setEffectiveWeight(st.shotW);
+    mixer.update(dt);
+  };
+  return st;
+}
+
 async function loadAssets(onProgress) {
   const prog = { s: 0, m: 0 };
   const report = () => onProgress?.((prog.s + prog.m) / 2);
@@ -717,6 +1140,10 @@ function makeSurvivorAvatar(name, colorIdx) {
       lFoot: find(/LeftFoot_/), rFoot: find(/RightFoot_/),
     };
     reg(g, 'entity');
+    // Own sonar material: uSelf fades between "lit by its own noise" and "just more background".
+    const sonar = makeSonarMaterial(ENTITY_SONAR);
+    for (const e of swappables) if (e.mesh.parent && g.getObjectById(e.mesh.id)) { e.m = sonar; if (viewMode === 'monster') e.mesh.material = sonar; }
+    g.userData.sonar = sonar;
     const label = makeLabel(name); label.position.y = 2.05; g.add(label);
     g.userData.rig = rig;
     scene.add(g);
@@ -740,25 +1167,22 @@ function makeMonsterAvatar() {
   const g = new THREE.Group();
   const rig = new THREE.Group(); g.add(rig);
   if (ASSETS.monster) {
-    const U = { uArms: { value: new THREE.Vector2() }, uArmPivot: { value: ASSETS.monster.pivot.clone() } };
-    const model = ASSETS.monster.template.clone(true);
+    const model = SkeletonUtils.clone(ASSETS.monster.template);
     const mats = [], meshes = [];
     model.traverse((o) => {
       if (!o.isMesh) return;
       // alphaHash gives a dithered fade for the camouflage without transparency sorting.
-      const m = hookArmBend(o.material.clone(), U); m.alphaHash = true;
+      const m = o.material.clone(); m.alphaHash = true;
       o.material = m; mats.push(m); meshes.push(o);
-      o.customDepthMaterial = hookArmBend(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }), U);
     });
     rig.add(model);
     reg(g, 'entity');
-    const sonar = makeSonarMaterial({ ...ENTITY_SONAR, bend: U });
-    for (const e of swappables) if (meshes.includes(e.mesh)) { e.m = sonar; if (viewMode === 'monster') e.mesh.material = sonar; }
-    g.userData.monster = { U, mats, meshes, camo: 0, stillT: 0, swing: 0, swingSide: 1, kill: -1 };
+    g.userData.monster = { anim: makeMonsterAnimator(model), mats, meshes, camo: 0, stillT: 0, still: 0 };
     g.userData.rig = rig;
     scene.add(g);
     return g;
   }
+  rig.scale.setScalar(MONSTER_H / 2.7);
   const skin = new THREE.MeshStandardMaterial({ color: 0x1b1714, roughness: 0.65, metalness: 0.1 });
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 1.35, 6, 14), skin); body.position.y = 1.35; body.scale.set(1, 1, 0.75);
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 18, 14), skin); head.scale.set(0.85, 1.35, 1.1); head.position.set(0, 2.45, -0.12);
@@ -845,7 +1269,7 @@ function panOf(pos) {
 // ----------------------------------------------------------------------------
 const game = {
   phase: 'menu', // menu | lobby | playing | ended
-  gens: GEN_TILES.map(() => ({ progress: 0, done: false })),
+  gens: GENS.map(() => ({ progress: 0, done: false })),
   timeLeft: CFG.DURATION,
   gateOpen: false,
 };
@@ -972,7 +1396,7 @@ function hostHandle(from, msg) {
     case 'sonar': if (p?.isMonster) broadcast({ t: 'event', k: 'sonar', by: from, x: p.x, z: p.z }); break;
     case 'escape': {
       if (!p || p.isMonster || p.s !== 'alive' || !hs.gateOpen) return;
-      if (cell(Math.floor(p.x / TILE), Math.floor(p.z / TILE)) !== 'X') return;
+      if (!inExit(p.x, p.z)) return;
       p.s = 'escaped';
       broadcast({ t: 'event', k: 'escaped', id: from, name: p.name });
       break;
@@ -1008,9 +1432,9 @@ function hostAttack(m, ry) {
 }
 function hostRepair(p, gi, dt) {
   if (!p || p.isMonster || p.s !== 'alive' || hs.phase !== 'playing') return;
-  const g = hs.gens[gi], t = GEN_TILES[gi];
+  const g = hs.gens[gi];
   if (!g || g.done) return;
-  const gp = tileCenter(t.x, t.z);
+  const gp = genPos(gi);
   if (Math.hypot(p.x - gp.x, p.z - gp.z) > 3.2) return;
   g.progress = Math.min(1, g.progress + clamp(+dt || 0, 0, 0.5) / CFG.GEN_TIME);
   if (g.progress >= 1 && !g.done) {
@@ -1018,8 +1442,7 @@ function hostRepair(p, gi, dt) {
     broadcast({ t: 'event', k: 'gen', i: gi, x: gp.x, z: gp.z, left: hs.gens.filter((x) => !x.done).length });
     if (hs.gens.every((x) => x.done) && !hs.gateOpen) {
       hs.gateOpen = true;
-      const d = tileCenter(GATE_TILE.x, GATE_TILE.z);
-      broadcast({ t: 'event', k: 'gate', x: d.x, z: d.z });
+      broadcast({ t: 'event', k: 'gate', x: GATE.x, z: GATE.z });
     }
   }
 }
@@ -1029,15 +1452,15 @@ function hostStart() {
   let si = 0;
   list.forEach((p, idx) => {
     p.hp = CFG.MAX_HP; p.s = 'alive'; p.n = 0; p.c = 0; p.r = 0; p.lastHit = -99; p.lastAttack = -99; p.colorIdx = idx;
-    let t;
-    if (p.isMonster) t = SPAWN_M; else { t = SPAWN_S[si % SPAWN_S.length]; si++; }
-    const c = tileCenter(t.x, t.z);
-    const off = p.isMonster ? 0 : Math.floor((si - 1) / SPAWN_S.length);
-    p.x = c.x + (off % 2) * 1.6; p.z = c.z + Math.floor(off / 2) * 1.6; p.ry = Math.random() * Math.PI * 2;
+    if (p.isMonster) { p.x = SPAWN_MON.x; p.z = SPAWN_MON.z; p.ry = Math.random() * Math.PI * 2; }
+    else {
+      const [sx, sz] = SPAWN_SURV[si % SPAWN_SURV.length]; si++;
+      p.x = sx; p.z = sz; p.ry = Math.atan2(-(CAMPFIRE.x - sx), -(CAMPFIRE.z - sz)) + Math.PI; // back to the fire
+    }
     p.bot = p.isBot ? newBrain(p) : null;
   });
   hs.phase = 'playing'; hs.timeLeft = CFG.DURATION; hs.gateOpen = false; hs.lastKill = undefined;
-  hs.gens = GEN_TILES.map(() => ({ progress: 0, done: false }));
+  hs.gens = GENS.map(() => ({ progress: 0, done: false }));
   broadcast({ t: 'start', duration: CFG.DURATION, players: list.map((p) => ({ id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot, x: p.x, z: p.z, ry: p.ry, colorIdx: p.colorIdx })) });
 }
 function hostUpdate(dt) {
@@ -1080,7 +1503,6 @@ function hostBackToLobby() { hs.phase = 'lobby'; broadcastLobby(); }
 // Survivor bots sneak to generators, repair them, flee from the monster and run for
 // the exit. The monster bot hunts by sound only: it hears survivors within a radius
 // set by their noise level, investigates, and shrieks (sonar) when it loses the trail.
-const tileOf = (x, z) => ({ x: Math.floor(x / TILE), z: Math.floor(z / TILE) });
 function newBrain(p) {
   return p.isMonster
     ? { path: [], goalKey: '', repathT: 0, mode: 'patrol', target: null, preyId: null, hearT: 0, sonarCD: 10, attackCD: 0, wait: 1, stuckT: 0, lx: p.x, lz: p.z }
@@ -1113,11 +1535,6 @@ function botStep(p, b, speed, r, dt, direct = null) {
   b.lx = p.x; b.lz = p.z;
   if (b.stuckT > 1) { b.path = []; b.goalKey = ''; b.stuckT = 0; }
   return false;
-}
-function randomFloorTile() { return FLOOR_TILES[Math.floor(Math.random() * FLOOR_TILES.length)]; }
-function walkableNeighbour(t) {
-  for (const [dx, dz] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) if ('.SM'.includes(cell(t.x + dx, t.z + dz))) return { x: t.x + dx, z: t.z + dz };
-  return t;
 }
 function updateBot(p, dt) { if (p.isMonster) updateMonsterBot(p, dt); else updateSurvivorBot(p, dt); }
 
@@ -1179,11 +1596,10 @@ function updateSurvivorBot(p, dt) {
   p.c = mode === 'crouch' ? 1 : 0;
 
   if (hs.gateOpen) {
-    const exit = findTiles('X')[0];
-    botPathTo(p, b, exit, true);
+    botPathTo(p, b, tileOf(GATE.x, EXIT_ZONE.minZ + 4), true);
     p.n = CFG.NOISE[mode];
     botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt);
-    if (cell(Math.floor(p.x / TILE), Math.floor(p.z / TILE)) === 'X') {
+    if (inExit(p.x, p.z)) {
       p.s = 'escaped';
       broadcast({ t: 'event', k: 'escaped', id: p.id, name: p.name });
     }
@@ -1194,7 +1610,7 @@ function updateSurvivorBot(p, dt) {
   const taken = new Set(Object.values(hs.players).filter((q) => q !== p && q.bot && !q.isMonster && q.s === 'alive').map((q) => q.bot.gen));
   hs.gens.forEach((g, i) => {
     if (g.done) return;
-    const c = tileCenter(GEN_TILES[i].x, GEN_TILES[i].z), d = Math.hypot(c.x - p.x, c.z - p.z);
+    const c = genPos(i), d = Math.hypot(c.x - p.x, c.z - p.z);
     const score = d + (taken.has(i) ? 40 : 0);
     if (score < best) { best = score; gd = d; gi = i; }
   });
@@ -1203,16 +1619,17 @@ function updateSurvivorBot(p, dt) {
   if (gd < 2.3) {
     // Repair at 60% of a human's speed so a hunting monster has time to interrupt.
     p.r = 1; p.c = 0; p.n = CFG.NOISE.repair;
-    const c = tileCenter(GEN_TILES[gi].x, GEN_TILES[gi].z);
+    const c = genPos(gi);
     p.ry = Math.atan2(-(c.x - p.x), -(c.z - p.z));
     hostRepair(p, gi, dt * 0.6);
     return;
   }
-  botPathTo(p, b, walkableNeighbour(GEN_TILES[gi]));
+  botPathTo(p, b, genApproach(gi));
+  if (!b.path.length && gd > 2.3) { b.wait = 1 + Math.random(); b.goalKey = ''; p.n = 0; return; }
   p.n = CFG.NOISE[mode];
   if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) && gd >= 2.3) {
     // Arrived next to the generator tile: shuffle in close.
-    const c = tileCenter(GEN_TILES[gi].x, GEN_TILES[gi].z);
+    const c = genPos(gi);
     botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt, c);
   }
 }
@@ -1283,7 +1700,7 @@ function updateMonsterBot(p, dt) {
   // Patrol: drift between generators (where survivors must go) and random rooms.
   if (b.wait > 0) { b.wait -= dt; return; }
   if (!b.path.length) {
-    const t = Math.random() < 0.6 ? walkableNeighbour(GEN_TILES[Math.floor(Math.random() * GEN_TILES.length)]) : randomFloorTile();
+    const t = Math.random() < 0.6 ? genApproach(Math.floor(Math.random() * GENS.length)) : randomFloorTile();
     b.goalKey = ''; botPathTo(p, b, t);
     if (!b.path.length) { b.wait = 0.5; return; }
   }
@@ -1344,7 +1761,7 @@ function onStart(msg) {
       me.hp = CFG.MAX_HP; me.status = 'alive'; me.stamina = 1; me.exhausted = false; me.attackCD = 0; me.sonarCD = 2;
       me.escapeSent = false; me.boost = 0; me.damage = 0; me.repairGen = -1; me.colorIdx = p.colorIdx;
       me.killCam = null; me.roll = 0; me.flinch = 0; me.camo = 0; me.stillT = 0;
-      me.eye = me.isMonster ? 2.3 : 1.6;
+      me.eye = me.isMonster ? 1.95 : 1.6;
     } else addRemote(p);
   }
   setViewMode(me.isMonster ? 'monster' : 'survivor');
@@ -1379,7 +1796,7 @@ function removeRemote(id) {
 function leaveMatch() {
   for (const id of [...players.keys()]) removeRemote(id);
   game.gateOpen = false;
-  if (world.gate) world.gate.position.y = WALL_H / 2;
+  if (world.gate) world.gate.mesh.position.x = world.gate.x0;
 }
 function onSnap(msg) {
   if (game.phase !== 'playing') return;
@@ -1416,7 +1833,7 @@ function onEvent(e) {
     case 'swing': {
       const m = players.get(e.by);
       const M = m?.avatar.userData.monster;
-      if (M && M.kill < 0) { M.swing = 0.55; M.swingSide = -M.swingSide; }
+      if (M && M.anim.act.kill && M.anim.shot !== 'kill') M.anim.play('swipe');
       if (m && !me.isMonster) noise({ dur: 0.3, vol: 0.3 * distVol(m.pos, 25), pan: panOf(m.pos), freq: 1600, q: 0.8 });
       break;
     }
@@ -1426,7 +1843,7 @@ function onEvent(e) {
       const m = players.get(e.by), M = m?.avatar.userData.monster;
       if (lethal && m) {
         // Monster kill animation, turned toward its victim.
-        if (M) { M.kill = 0; M.swing = 0; }
+        if (M) M.anim.play('kill');
         m.targetYaw = Math.atan2(-(e.x - m.pos.x), -(e.z - m.pos.z));
       }
       if (e.id === me.id) {
@@ -1443,6 +1860,8 @@ function onEvent(e) {
       break;
     }
     case 'sonar': {
+      const sm = players.get(e.by)?.avatar.userData.monster;
+      if (sm && sm.anim.shot !== 'kill') sm.anim.play('shriek');
       if (e.by !== me.id) { addRipple(pos.setY(1.5), 30, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); }
       break;
     }
@@ -1603,7 +2022,7 @@ function updateKillCam(dt) {
   const K = me.killCam; K.t += dt;
   const m = players.get(K.by);
   if (m) {
-    const head = 2.35, d = Math.max(0.5, Math.hypot(m.pos.x - me.pos.x, m.pos.z - me.pos.z));
+    const head = MONSTER_H - 0.2, d = Math.max(0.5, Math.hypot(m.pos.x - me.pos.x, m.pos.z - me.pos.z));
     me.yaw = angleDamp(me.yaw, Math.atan2(-(m.pos.x - me.pos.x), -(m.pos.z - me.pos.z)), 8, dt);
     if (K.t < KILL.slam) me.pitch = damp(me.pitch, Math.atan2(head - me.eye, d), 6, dt);
   }
@@ -1658,9 +2077,9 @@ function updateLocal(dt) {
   let nearGen = -1;
   if (!me.isMonster) {
     let best = 2.6;
-    GEN_TILES.forEach((t, i) => {
+    GENS.forEach((G, i) => {
       if (game.gens[i].done) return;
-      const d = Math.hypot(me.pos.x - (t.x + 0.5) * TILE, me.pos.z - (t.z + 0.5) * TILE);
+      const d = Math.hypot(me.pos.x - G.x, me.pos.z - G.z);
       if (d < best) { best = d; nearGen = i; }
     });
   }
@@ -1708,11 +2127,11 @@ function updateLocal(dt) {
   }
 
   // ---- Escape
-  if (!me.isMonster && game.gateOpen && !me.escapeSent && cell(Math.floor(me.pos.x / TILE), Math.floor(me.pos.z / TILE)) === 'X') {
+  if (!me.isMonster && game.gateOpen && !me.escapeSent && inExit(me.pos.x, me.pos.z)) {
     me.escapeSent = true; sendToHost({ t: 'escape' });
   }
 
-  const targetEye = me.isMonster ? 2.3 : me.crouch ? 1.0 : 1.6;
+  const targetEye = me.isMonster ? 1.95 : me.crouch ? 1.0 : 1.6;
   me.eye = damp(me.eye, targetEye, 10, dt);
   me.bob += moving ? dt * speed * 2.2 : 0;
   applyCamera(dt, moving ? (me.isMonster ? 0.06 : 0.04) * (speed / 3.4) : 0);
@@ -1733,6 +2152,11 @@ const KILL = { raise: 0.45, slam: 0.7, recover: 1.25, end: 1.7 }; // monster kil
 
 function animateSurvivor(r, dt) {
   const a = r.avatar, A = r.anim, rig = a.userData.rig, B = a.userData.bones;
+  // In monster vision a survivor stands out only while making noise; standing still they
+  // fade back into the environment grid over ~1.5 s.
+  const loud = r.noise > 0.05 || r.repairing || A.flinch > 0.1 || A.dead >= 0;
+  A.self = loud ? Math.min(1, (A.self ?? 0) + dt * 6) : Math.max(0, (A.self ?? 0) - dt * 0.7);
+  if (a.userData.sonar) a.userData.sonar.uniforms.uSelf.value = A.self;
   A.flinch = Math.max(0, A.flinch - dt * 2.5);
   if (A.deadDelay > 0) { A.deadDelay -= dt; if (A.deadDelay <= 0) A.dead = 0; }
   const dead = A.dead >= 0;
@@ -1778,45 +2202,20 @@ function animateSurvivor(r, dt) {
 
 function animateMonster(r, dt) {
   const a = r.avatar, rig = a.userData.rig, M = a.userData.monster;
-  const gait = Math.min(r.speed, 6);
-  let L = 0, Rt = 0, lean = 0.1 + gait * 0.025 + Math.sin(time * 1.3) * 0.03, lunge = 0, bob = 0;
-  // Walk: lurching bob and counter-swinging arms; idle: slow breathing sway.
-  const swing = Math.sin(r.walkT * 0.5) * 0.5 * Math.min(gait / 3, 1);
-  L = swing + Math.sin(time * 1.1) * 0.06; Rt = -swing + Math.sin(time * 1.1 + 1) * 0.06;
-  bob = Math.abs(Math.sin(r.walkT * 0.5)) * 0.08 * Math.min(gait, 1.5) + Math.sin(time * 2) * 0.015;
-  rig.rotation.z = Math.sin(r.walkT * 0.5) * 0.05 * Math.min(gait, 1.5);
-  if (M) {
-    if (M.swing > 0) {
-      // Claw swipe: wind up, then rake down and across.
-      M.swing = Math.max(0, M.swing - dt);
-      const p = 1 - M.swing / 0.55;
-      const ang = p < 0.35 ? lerp(0, 2.1, ease(p / 0.35)) : lerp(2.1, -0.5, ease((p - 0.35) / 0.65));
-      if (M.swingSide > 0) Rt = ang; else L = ang;
-      lunge = Math.sin(p * Math.PI) * 0.35; lean += Math.sin(p * Math.PI) * 0.25;
-    }
-    if (M.kill >= 0) {
-      // Kill: rear up with both arms raised, slam them down, then straighten.
-      M.kill += dt;
-      const t = M.kill;
-      let arms;
-      if (t < KILL.raise) { arms = lerp(0, 2.5, ease(t / KILL.raise)); lean = lerp(lean, -0.25, ease(t / KILL.raise)); }
-      else if (t < KILL.slam) { const k = ease((t - KILL.raise) / (KILL.slam - KILL.raise)); arms = lerp(2.5, -0.3, k); lean = lerp(-0.25, 0.6, k); lunge = 0.7 * k; }
-      else if (t < KILL.recover) { arms = -0.3; lean = 0.6; lunge = 0.7; }
-      else { const k = ease((t - KILL.recover) / (KILL.end - KILL.recover)); arms = lerp(-0.3, 0, k); lean = lerp(0.6, lean, k); lunge = lerp(0.7, 0, k); }
-      L = Rt = arms;
-      if (t > KILL.end) M.kill = -1;
-    }
-    M.U.uArms.value.set(L, Rt);
-    // Camouflage: standing still for a moment fades it into the background for survivors.
-    M.stillT = r.speed < 0.3 && M.swing <= 0 && M.kill < 0 ? M.stillT + dt : 0;
-    M.camo = M.stillT > 0.6 ? Math.min(1, M.camo + dt / 1.4) : Math.max(0, M.camo - dt / 0.25);
-    const op = 1 - 0.95 * M.camo;
-    for (const m of M.mats) m.opacity = op;
-    for (const o of M.meshes) o.castShadow = M.camo < 0.5;
+  if (!M) { // primitive fallback: simple lurch
+    const gait = Math.min(r.speed, 6);
+    rig.rotation.x = 0.1 + gait * 0.025 + Math.sin(time * 1.3) * 0.03;
+    rig.position.y = Math.abs(Math.sin(r.walkT * 0.5)) * 0.08 * Math.min(gait, 1.5);
+    return;
   }
-  rig.rotation.x = lean;
-  rig.position.y = bob;
-  rig.position.z = -lunge;
+  // Still for a moment -> drops into its listening crouch and fades almost completely.
+  M.stillT = r.speed < 0.3 && !M.anim.busy() ? M.stillT + dt : 0;
+  const still = M.stillT > 0.6 ? 1 : 0;
+  M.anim.update(dt, r.speed, still);
+  M.camo = still ? Math.min(1, M.camo + dt / 1.2) : Math.max(0, M.camo - dt / 0.25);
+  const op = 1 - 0.985 * M.camo;
+  for (const m of M.mats) m.opacity = op;
+  for (const o of M.meshes) o.castShadow = M.camo < 0.3;
 }
 
 function updateRemotes(dt) {
@@ -1862,15 +2261,14 @@ function updateRemotes(dt) {
 // ----------------------------------------------------------------------------
 let heartT = 0;
 function updateWorld(dt, monsterDist) {
-  // Lamps flicker
-  for (const l of world.lamps) {
-    if (!l.light) continue;
-    let k = 1;
-    if (l.bad) { const f = Math.sin(time * 13 + l.phase) * Math.sin(time * 4.7 + l.phase * 2); k = f > 0.6 ? 0.05 : 0.85 + Math.random() * 0.15; }
-    else k = 0.92 + Math.sin(time * 40 + l.phase) * 0.04;
+  // Firelight and cabin lamps flicker
+  for (const l of world.flickers) {
+    const k = l.kind === 'fire'
+      ? 0.75 + Math.sin(time * 9 + l.phase) * 0.12 + Math.sin(time * 23.7) * 0.08 + Math.random() * 0.08
+      : 0.9 + Math.sin(time * 31 + l.phase) * 0.04 + (Math.sin(time * 2.3 + l.phase) > 0.97 ? -0.5 : 0);
     l.light.intensity = l.base * k;
-    l.fx.material.emissiveIntensity = 2.5 * k;
   }
+  if (world.fire) world.fire.flames.forEach((f, i) => { f.scale.set(1, 0.8 + Math.sin(time * 11 + i * 2) * 0.25 + Math.random() * 0.1, 1); f.rotation.y = time * (1 + i); });
   // Generators
   world.gens.forEach((g, i) => {
     const s = game.gens[i];
@@ -1882,7 +2280,8 @@ function updateWorld(dt, monsterDist) {
     g.group.position.x = g.pos.x + (running ? Math.sin(time * 60) * 0.006 : 0) + Math.sin(time * 80) * g.shake * 0.04;
   });
   // Gate
-  if (world.gate) world.gate.position.y = damp(world.gate.position.y, game.gateOpen ? WALL_H * 1.5 + 0.05 : WALL_H / 2, 0.8, dt);
+  // Gate slides aside when all generators are running
+  if (world.gate) world.gate.mesh.position.x = damp(world.gate.mesh.position.x, world.gate.x0 + (game.gateOpen ? GATE.w + 0.2 : 0), 0.8, dt);
   if (world.exitLight) world.exitLight.color.setHex(game.gateOpen ? 0x2cff70 : 0xff2a10);
 
   // Post-process uniforms
@@ -1918,7 +2317,7 @@ function updateHUD() {
     $('#noise-fill').style.width = `${me.noise * 100}%`;
     if (me.status === 'alive') {
       if (me.repairGen >= 0) prompt = `${me.repairing ? 'Repairing' : 'Hold E to repair'} — ${Math.floor(game.gens[me.repairGen].progress * 100)}%`;
-      else if (game.gateOpen && cell(Math.floor(me.pos.x / TILE), Math.floor(me.pos.z / TILE)) !== 'X') prompt = '';
+      else if (game.gateOpen && !inExit(me.pos.x, me.pos.z)) prompt = 'The gate is open: get to the road south of the camp.';
     }
   }
   $('#prompt').textContent = prompt;
@@ -1933,14 +2332,14 @@ function addFeed(text, cls = '') {
 // Lobby backdrop: slow orbit over the facility in monster vision, random pings
 let lobbyPingT = 0;
 function updateLobbyCamera(dt) {
-  const cx = (MW * TILE) / 2, cz = (MH * TILE) / 2;
+  const cx = AREA / 2, cz = AREA / 2;
   const a = time * 0.05;
-  camera.position.set(cx + Math.cos(a) * 55, 48, cz + Math.sin(a) * 45);
+  camera.position.set(cx + Math.cos(a) * 70, 55, cz + Math.sin(a) * 60);
   camera.lookAt(cx, 0, cz);
   lobbyPingT -= dt;
   if (lobbyPingT <= 0) {
     lobbyPingT = 0.35 + Math.random() * 0.6;
-    const t = FLOOR_TILES[Math.floor(Math.random() * FLOOR_TILES.length)];
+    const t = randomFloorTile();
     const p = tileCenter(t.x, t.z);
     const n = Math.random();
     addRipple(p.setY(0.05), 4 + n * 14, 0.4 + n);
@@ -2051,4 +2450,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, hostUpdate, hostAttack, DEBUG, KILL };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, hostUpdate, hostAttack, DEBUG, KILL, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };

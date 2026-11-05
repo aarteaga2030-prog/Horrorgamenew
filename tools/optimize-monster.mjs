@@ -1,11 +1,13 @@
-// Turns the 23 MB Sketchfab wendigo into a light, game-ready model:
+// Builds the game-ready, fully rigged wendigo from the 23 MB Sketchfab source:
 //   1. joins the body (exported as eight interleaved 65k-vertex chunks) back into one mesh,
-//   2. welds and simplifies it to roughly 12% of the triangles,
-//   3. bakes node transforms into world space and swings the T-posed arms down to hang
-//      by its sides (the source has no skeleton, so this is a one-off vertex bend),
-//   4. stores a per-vertex arm weight (_ARM: -1 one arm, +1 the other, 0 body) and the
-//      shoulder pivot (scene extras.armPivot) so the game can swing the arms in a shader,
-//   5. regenerates smooth normals, resizes textures to 1024 px WebP, and quantizes.
+//      welds it and simplifies it to roughly 12% of the triangles,
+//   2. bakes node transforms and rescales it to 7 ft (2.13 m), feet on y = 0, facing +Z,
+//   3. builds a humanoid skeleton (spine, neck, head, clavicles, arms, hands, claws,
+//      legs, feet, toes) at joint positions measured from the T-posed mesh,
+//   4. skins every vertex to up to four bones, blending smoothly across each joint,
+//   5. regenerates normals, resizes textures to 1024 px WebP and quantizes normals/UVs.
+// The game builds its animation clips (idle, walk, run, stalk, swipes, kill, shriek)
+// at runtime against these bone names.
 //
 // Usage (needs @gltf-transform/{core,extensions,functions}, meshoptimizer and sharp):
 //   node tools/optimize-monster.mjs assets/source/wendigo-original.glb assets/monster.glb
@@ -16,9 +18,12 @@ import { MeshoptSimplifier } from 'meshoptimizer';
 import sharp from 'sharp';
 
 const [,, inp, out] = process.argv;
+const HEIGHT = 2.13; // 7 ft
+
 const io = new NodeIO().registerExtensions(ALL_EXTENSIONS);
 const doc = await io.read(inp);
 const root = doc.getRoot();
+const buffer = root.listBuffers()[0];
 
 // Per-face normals/tangents stop coincident vertices from merging; they are rebuilt later.
 for (const mesh of root.listMeshes()) for (const p of mesh.listPrimitives()) {
@@ -26,69 +31,120 @@ for (const mesh of root.listMeshes()) for (const p of mesh.listPrimitives()) {
 }
 await MeshoptSimplifier.ready;
 await doc.transform(dedup(), flatten(), join({ keepNamed: false }), weld());
-// Bake every mesh node's transform into its vertices so we can edit in world space (Y up).
 for (const node of root.listNodes()) if (node.getMesh()) clearNodeTransform(node);
 await doc.transform(simplify({ simplifier: MeshoptSimplifier, ratio: 0.12, error: 0.004 }));
 
-// ---- Arm bend --------------------------------------------------------------
+// ---- Rescale to 7 ft, feet at y = 0, centred on x/z ----------------------------
 const prims = root.listMeshes().flatMap((m) => m.listPrimitives());
-let minY = Infinity, maxY = -Infinity, maxX = 0;
+let minY = Infinity, maxY = -Infinity;
 for (const p of prims) {
   const a = p.getAttribute('POSITION'), v = [0, 0, 0];
-  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); minY = Math.min(minY, v[1]); maxY = Math.max(maxY, v[1]); maxX = Math.max(maxX, Math.abs(v[0])); }
+  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); minY = Math.min(minY, v[1]); maxY = Math.max(maxY, v[1]); }
 }
-const H = maxY - minY;
-// Arm height: mean Y of the outermost vertices. Torso half-width: widest point a little below that.
-let sy = 0, n = 0, torso = 0;
+const S = HEIGHT / (maxY - minY);
 for (const p of prims) {
   const a = p.getAttribute('POSITION'), v = [0, 0, 0];
-  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); if (Math.abs(v[0]) > maxX * 0.6) { sy += v[1]; n++; } }
+  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); a.setElement(i, [v[0] * S, (v[1] - minY) * S, v[2] * S]); }
 }
-const armY = sy / n;
-for (const p of prims) {
-  const a = p.getAttribute('POSITION'), v = [0, 0, 0];
-  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); if (Math.abs(v[1] - (armY - H * 0.12)) < H * 0.02) torso = Math.max(torso, Math.abs(v[0])); }
+
+// ---- Skeleton ------------------------------------------------------------------
+// Joint positions (metres, model faces +Z, +X is the creature's left), measured by
+// slicing the T-posed mesh: the legs separate below 1.22 m, the arms run level at
+// 1.76 m, thinnest at the elbow (0.56) and wrist (0.88), and the long claws start at 1.08.
+const J = {
+  Hips: [0, 1.22, -0.065], Spine: [0, 1.40, -0.06], Chest: [0, 1.62, -0.055], Neck: [0, 1.84, -0.045], Head: [0, 1.93, 0.0],
+};
+for (const [side, s] of [['L', 1], ['R', -1]]) {
+  J['Clavicle' + side] = [0.04 * s, 1.74, -0.06];
+  J['UpperArm' + side] = [0.13 * s, 1.76, -0.065];
+  J['Forearm' + side] = [0.56 * s, 1.76, -0.07];
+  J['Hand' + side] = [0.88 * s, 1.75, -0.085];
+  J['Claws' + side] = [1.08 * s, 1.75, -0.09];
+  J['UpLeg' + side] = [0.075 * s, 1.18, -0.065];
+  J['Leg' + side] = [0.12 * s, 0.66, -0.075];
+  J['Foot' + side] = [0.19 * s, 0.11, -0.165];
+  J['Toe' + side] = [0.2 * s, 0.03, -0.05];
 }
-const px = torso * 0.9, py = armY, blend = H * 0.07;
-const theta = (72 * Math.PI) / 180;       // how far the arms swing down
-const reach = (14 * Math.PI) / 180;       // and a little forward (+Z, the model's front)
-const smooth = (t) => t * t * (3 - 2 * t);
-// Shoulder depth: mean Z of the torso at shoulder height.
-let pzSum = 0, pzN = 0;
-for (const p of prims) {
-  const a = p.getAttribute('POSITION'), v = [0, 0, 0];
-  for (let i = 0; i < a.getCount(); i++) { a.getElement(i, v); if (Math.abs(v[0]) < px && Math.abs(v[1] - py) < H * 0.03) { pzSum += v[2]; pzN++; } }
+const PARENT = { Hips: null, Spine: 'Hips', Chest: 'Spine', Neck: 'Chest', Head: 'Neck' };
+for (const side of ['L', 'R']) {
+  Object.assign(PARENT, {
+    ['Clavicle' + side]: 'Chest', ['UpperArm' + side]: 'Clavicle' + side, ['Forearm' + side]: 'UpperArm' + side,
+    ['Hand' + side]: 'Forearm' + side, ['Claws' + side]: 'Hand' + side,
+    ['UpLeg' + side]: 'Hips', ['Leg' + side]: 'UpLeg' + side, ['Foot' + side]: 'Leg' + side, ['Toe' + side]: 'Foot' + side,
+  });
 }
-const pz = pzN ? pzSum / pzN : 0;
-const buffer = root.listBuffers()[0];
-for (const p of prims) {
-  const a = p.getAttribute('POSITION'), v = [0, 0, 0];
-  const arm = new Float32Array(a.getCount());
-  p.setAttribute('_ARM', doc.createAccessor().setType(Accessor.Type.SCALAR).setArray(arm).setBuffer(buffer));
-  for (let i = 0; i < a.getCount(); i++) {
-    a.getElement(i, v);
-    const s = Math.sign(v[0]), u = Math.abs(v[0]) - px;
-    if (u <= 0 || v[1] < py - H * 0.25) continue; // only the arms, never the legs
-    const k = smooth(Math.min(1, u / blend));
-    arm[i] = s * k;
-    const t = theta * k, w = v[1] - py;
-    const u2 = u * Math.cos(t) + w * Math.sin(t);
-    const w2 = -u * Math.sin(t) + w * Math.cos(t);
-    v[0] = s * (px + u2); v[1] = py + w2; v[2] += Math.max(0, u) * Math.sin(reach) * k;
-    a.setElement(i, v);
+const names = Object.keys(J);
+const index = Object.fromEntries(names.map((n, i) => [n, i]));
+const scene = root.listScenes()[0];
+const armature = doc.createNode('Armature');
+scene.addChild(armature);
+const nodes = {};
+for (const n of names) {
+  const p = J[n], par = PARENT[n];
+  const local = par ? [p[0] - J[par][0], p[1] - J[par][1], p[2] - J[par][2]] : p;
+  nodes[n] = doc.createNode(n).setTranslation(local);
+}
+for (const n of names) (PARENT[n] ? nodes[PARENT[n]] : armature).addChild(nodes[n]);
+const skin = doc.createSkin('WendigoSkin').setSkeleton(nodes.Hips);
+const ibm = new Float32Array(names.length * 16);
+names.forEach((n, i) => {
+  skin.addJoint(nodes[n]);
+  const m = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -J[n][0], -J[n][1], -J[n][2], 1]; // inverse of a pure translation
+  ibm.set(m, i * 16);
+});
+skin.setInverseBindMatrices(doc.createAccessor('ibm').setType(Accessor.Type.MAT4).setArray(ibm).setBuffer(buffer));
+for (const node of root.listNodes()) if (node.getMesh()) node.setSkin(skin);
+
+// ---- Skin weights ----------------------------------------------------------------
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+// Weights along a chain of bones laid out on one scalar coordinate c (joint starts ascending).
+function chain(c, starts, bones, blend, out, scale) {
+  for (let k = 0; k < bones.length; k++) {
+    const lo = k === 0 ? -Infinity : starts[k], hi = k === bones.length - 1 ? Infinity : starts[k + 1];
+    const w = (k === 0 ? 1 : smooth(lo - blend, lo + blend, c)) * (hi === Infinity ? 1 : 1 - smooth(hi - blend, hi + blend, c));
+    if (w > 1e-4) out[bones[k]] = (out[bones[k]] || 0) + w * scale;
   }
 }
-root.listScenes()[0].setExtras({ armPivot: [0, py, pz] });
-console.log({ H: +H.toFixed(2), armY: +armY.toFixed(2), torso: +torso.toFixed(2), span: +(maxX * 2).toFixed(2), pz: +pz.toFixed(3) });
+function weightsFor(x, y, z) {
+  const w = {};
+  const s = x >= 0 ? 'L' : 'R', ax = Math.abs(x);
+  // Region masks: arms (outboard at shoulder height), legs (below the crotch), torso (rest).
+  const armMask = smooth(0.08, 0.15, ax) * smooth(1.6, 1.68, y);
+  const legMask = (1 - smooth(1.14, 1.3, y)) * (1 - armMask);
+  const torsoMask = Math.max(0, 1 - armMask - legMask);
+  if (armMask > 0) chain(ax, [0.04, 0.13, 0.56, 0.88, 1.08], ['Clavicle', 'UpperArm', 'Forearm', 'Hand', 'Claws'].map((b) => b + s), 0.04, w, armMask);
+  if (torsoMask > 0) chain(y, [1.22, 1.40, 1.62, 1.84, 1.93], ['Hips', 'Spine', 'Chest', 'Neck', 'Head'], 0.06, w, torsoMask);
+  if (legMask > 0) {
+    // Down the leg: thigh, shin, then the foot, whose front splits off as the toes.
+    const legW = {};
+    chain(-y, [-1.22, -0.66, -0.11], ['UpLeg' + s, 'Leg' + s, 'Foot' + s], 0.05, legW, 1);
+    const foot = legW['Foot' + s] || 0;
+    if (foot > 0) { const toe = smooth(-0.09, -0.02, z); legW['Foot' + s] = foot * (1 - toe); legW['Toe' + s] = foot * toe; }
+    for (const [b, v] of Object.entries(legW)) w[b] = (w[b] || 0) + v * legMask;
+  }
+  // Keep the four strongest and normalise.
+  const top = Object.entries(w).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const sum = top.reduce((a, [, v]) => a + v, 0) || 1;
+  return top.map(([b, v]) => [index[b], v / sum]);
+}
+for (const p of prims) {
+  const a = p.getAttribute('POSITION'), n = a.getCount(), v = [0, 0, 0];
+  const joints = new Uint8Array(n * 4), weights = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    a.getElement(i, v);
+    weightsFor(v[0], v[1], v[2]).forEach(([j, wt], k) => { joints[i * 4 + k] = j; weights[i * 4 + k] = wt; });
+  }
+  p.setAttribute('JOINTS_0', doc.createAccessor().setType(Accessor.Type.VEC4).setArray(joints).setBuffer(buffer));
+  p.setAttribute('WEIGHTS_0', doc.createAccessor().setType(Accessor.Type.VEC4).setArray(weights).setBuffer(buffer));
+}
 
 await doc.transform(
   normals({ overwrite: true }),
   weld(),
-  prune(),
+  prune({ keepLeaves: true }), // keep leaf bones (head, claws, toes)
   textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024] }),
-  // Positions stay float so the vertex space matches extras.armPivot (no dequantize transform).
-  quantize({ pattern: /^(NORMAL|TEXCOORD_\d+)$/ }),
+  quantize({ pattern: /^(NORMAL|TEXCOORD_\d+|WEIGHTS_\d+)$/ }),
 );
 await io.write(out, doc);
 let verts = 0; for (const p of root.listMeshes().flatMap((m) => m.listPrimitives())) verts += p.getAttribute('POSITION').getCount();
-console.log('vertices', verts);
+console.log(`wrote ${out}: ${verts} vertices, ${names.length} bones, height ${HEIGHT} m`);

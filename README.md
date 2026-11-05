@@ -18,13 +18,22 @@ python3 -m http.server 8000
 | | Survivors | Monster |
 |---|---|---|
 | Goal | Repair all 3 generators (hold **E**) to open the exit gate, then escape. Or stay alive until the 5:00 timer runs out. | Catch every survivor (2 hits each). |
-| Sees | A normally lit 3D facility, plus a flashlight (**F**). | A dark green wireframe grid. The world is almost invisible until sound lights it up. |
+| Sees | A moonlit forest, plus a flashlight (**F**). | A dark green wireframe grid. The world is almost invisible until sound lights it up. |
 | Movement | **WASD** / arrows. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** / arrows. **Shift** charge. |
 | Abilities | Repairing hums, which also makes noise. | **LMB** or **Space** strike. **Q** / **RMB** sonar shriek (reveals everything nearby; survivors hear it). |
 
 **Looking around:** click the game to lock the mouse cursor. If the browser won't allow pointer lock, or on a touch screen, drag across the screen to look instead. Touch is only for looking; movement and actions always come from the keyboard.
 
-**Camouflage:** a monster that stands still fades into a faint, dithered shimmer for survivors. Its HUD shows when it is hidden.
+### The map
+A fenced, 120 m square of night forest:
+- **Trees and obstacles:** pines and dead trees, rocks and fallen logs (all solid), plus bushes you can hide behind.
+- **Buildings:** a two-room main cabin, a hunting cabin and a shed. Each holds one generator and has lit windows.
+- **Camp:** the survivors start around a campfire. Dirt paths link it to the buildings and the exit gate.
+- **Exit:** the gate is in the south fence. Once all three generators run, it slides open and the road beyond it is the way out.
+
+**Camouflage:**
+- **Monster:** standing still makes it drop into a listening crouch and fade almost completely for survivors. Only a few dithered specks remain, and it casts no shadow. The monster's HUD shows when it is hidden.
+- **Survivors:** in monster vision they only stand out while making noise. Still survivors fade back into the environment grid within about 1.5 s, so they look like any other tree or wall when a ripple passes over them.
 
 **Kills:** the monster rears up and slams its claws down, and the survivor falls backward. A survivor who is taken sees it in first person: they're turned to face the monster, then collapse to the floor. The match result waits until the final kill has played out.
 
@@ -65,13 +74,19 @@ Peer-to-peer connections need STUN to get through NAT. Some strict networks also
 | File | What it is |
 |---|---|
 | `assets/survivor.glb` | [Survivor [Toon-Style]](https://sketchfab.com/3d-models/survivor-toon-style-5aa13349079141d0927b8ea96e1349c4) by lalit (CC BY 4.0). Skinned, with one "Walk + Idle" clip that the game splits into a walk loop and an idle loop. |
-| `assets/monster.glb` | Game-ready version of [Wendigo](https://sketchfab.com/3d-models/wendigo-inspired-by-until-dawn-d46093a707a24444af1ed7d10aa7198f) by marc3_C (CC BY 4.0), built by `tools/optimize-monster.mjs`: 23 MB → 1.9 MB, its T-posed arms bent down to hang, textures at 1024 px WebP. |
+| `assets/monster.glb` | Rigged, game-ready version of [Wendigo](https://sketchfab.com/3d-models/wendigo-inspired-by-until-dawn-d46093a707a24444af1ed7d10aa7198f) by marc3_C (CC BY 4.0), built by `tools/optimize-monster.mjs`: 23 MB → 2.9 MB, scaled to 7 ft (2.13 m), with a 23-bone skeleton and skin weights, and textures at 1024 px WebP. |
 | `assets/source/wendigo-original.glb` | The original wendigo upload, kept as the source for the optimizer. |
 
 Notes:
 - **Survivor file:** as uploaded, it is truncated (its ambient-occlusion texture runs past the end of the file), so the reference to that texture was removed.
 - **Survivor material:** it uses the spec-gloss material extension, which three.js no longer reads, so the game re-applies its diffuse texture in code.
-- **Monster animation:** the wendigo has no skeleton. The optimizer bakes a per-vertex arm weight (`_ARM`) and the shoulder pivot (`extras.armPivot`), and a vertex-shader hook swings the arms around the shoulder axis. That drives the walk swing, claw swipes and the kill slam, in both the normal and sonar views and in shadows. The body's hunch, sway, lunge and bob are procedural.
+- **Monster rig:** the source wendigo had no skeleton, so the optimizer auto-rigs it.
+  - It measures joint positions by slicing the T-posed mesh: the legs separate below the crotch, the arms are thinnest at the elbow and wrist, and the claws fan out past the hand.
+  - It builds a 23-bone humanoid skeleton: hips, spine, chest, neck, head, and clavicles, upper arms, forearms, hands, claws, thighs, shins, feet and toes on each side.
+  - It skins every vertex to up to four bones, with smooth blends across each joint.
+- **Monster animation:** `game.js` builds the clips at runtime from pose functions: idle, walk, run, stalk (the still/listening crouch), left and right claw swipes, kill and shriek.
+  - Locomotion blends by speed and stillness.
+  - Swipes, the kill and the shriek play on top, triggered by attack, kill and sonar events, so everyone sees the same animation.
 - **Survivor animation:** the walk/idle clips are blended by speed. Crouch, sprint lean, repairing, hit flinch and the death fall are layered on top as procedural bone rotations.
 
 ## Playtest build (Claude artifact)
