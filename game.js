@@ -9,6 +9,8 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 // ----------------------------------------------------------------------------
 //  CONFIG
@@ -145,7 +147,7 @@ function moveWithCollision(p, dx, dz, r) {
   for (let i = 0; i < steps; i++) { p.x += dx / steps; p.z += dz / steps; resolveCollision(p, r); }
 }
 // BFS path between tiles (used by bots).
-function bfsPath(from, to) {
+function bfsPath(from, to, allowExit = false) {
   const key = (x, z) => z * MW + x;
   const prev = new Map([[key(from.x, from.z), -1]]);
   const q = [from];
@@ -154,7 +156,7 @@ function bfsPath(from, to) {
     if (c.x === to.x && c.z === to.z) break;
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = c.x + dx, nz = c.z + dz, ch = cell(nx, nz);
-      if ('#CGDX'.includes(ch) || prev.has(key(nx, nz))) continue;
+      if ('#CG'.includes(ch) || (!allowExit && 'DX'.includes(ch)) || prev.has(key(nx, nz))) continue;
       prev.set(key(nx, nz), key(c.x, c.z));
       q.push({ x: nx, z: nz });
     }
@@ -196,13 +198,21 @@ const sonarShared = {
   uRip: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector4(0, 0, 0, -999)) },  // xyz origin, w start time
   uRipP: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector3(0, 0, 1)) },       // x maxRadius, y strength, z speed
 };
+// Skinning chunks let animated (SkinnedMesh) characters deform in monster vision too.
 const SONAR_VERT = /* glsl */ `
+  #include <common>
+  #include <skinning_pars_vertex>
   varying vec3 vWorld;
   varying vec3 vNormalW;
   void main() {
-    vec4 wp = modelMatrix * vec4(position, 1.0);
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    vec4 wp = modelMatrix * vec4(transformed, 1.0);
     vWorld = wp.xyz;
-    vNormalW = normalize(mat3(modelMatrix) * normal);
+    vNormalW = normalize(mat3(modelMatrix) * objectNormal);
     gl_Position = projectionMatrix * viewMatrix * wp;
   }`;
 const SONAR_FRAG = /* glsl */ `
@@ -562,9 +572,110 @@ function makeLabel(text) {
   survivorOnly.push(s); s.visible = viewMode !== 'monster';
   return s;
 }
+// ---- GLB character models (assets/), loaded once and cloned per player
+const ASSETS = { survivor: null, monster: null, loaded: false };
+const loader = new GLTFLoader();
+// Decode embedded textures through <img> (TextureLoader) rather than fetch + createImageBitmap,
+// since sandboxed embeds may forbid fetching blob: URLs. GLTFLoader still sets flipY = false.
+loader.register((parser) => { parser.textureLoader = new THREE.TextureLoader(parser.options.manager); return { name: 'img_texture_loader' }; });
+function loadGLB(url, onProgress) {
+  if (window.BLINDSIGHT_EMBED) {
+    // The artifact host only serves web types, so the embed build ships each .glb as
+    // base64 inside a .json file (see tools/build-play.py).
+    return fetch(url + '.json').then((r) => { if (!r.ok) throw new Error(r.status + ' ' + url); return r.json(); }).then((j) => {
+      const bin = atob(j.glb), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      onProgress?.({ loaded: 1, total: 1 });
+      return new Promise((res, rej) => loader.parse(bytes.buffer, '', res, rej));
+    });
+  }
+  return new Promise((res, rej) => loader.load(url, res, (e) => onProgress?.(e), rej));
+}
+// Scale a model to a target height, stand it on y=0, centre it on x/z, and turn it to face -Z.
+function normalizeModel(root, height, yaw) {
+  const holder = new THREE.Group();
+  holder.add(root);
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root, true);
+  const size = box.getSize(new THREE.Vector3());
+  const k = height / Math.max(size.y, 1e-6);
+  root.scale.multiplyScalar(k);
+  root.updateMatrixWorld(true);
+  box.setFromObject(root, true);
+  const c = box.getCenter(new THREE.Vector3());
+  root.position.x -= c.x; root.position.z -= c.z; root.position.y -= box.min.y;
+  const out = new THREE.Group(); out.add(holder); holder.rotation.y = yaw;
+  return out;
+}
+async function prepSurvivorAsset(gltf) {
+  // The source uses KHR_materials_pbrSpecularGlossiness, which three.js no longer reads,
+  // so pull its diffuse texture (index 0) back in by hand.
+  let diffuse = null;
+  try { diffuse = await gltf.parser.getDependency('texture', 0); diffuse.colorSpace = THREE.SRGBColorSpace; } catch (e) { /* keep untextured */ }
+  gltf.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true; o.frustumCulled = false;
+    const m = o.material;
+    if (diffuse && !m.map) m.map = diffuse;
+    m.color?.set(0xffffff); m.metalness = 0; m.roughness = 0.75; m.side = THREE.FrontSide; m.needsUpdate = true;
+  });
+  const template = normalizeModel(gltf.scene, 1.75, Math.PI);
+  // The single "Walk + Idle" clip (60 fps) holds a walk cycle (frames 0-64) then an idle (75-180).
+  const clip = gltf.animations[0];
+  let walk = null, idle = null;
+  if (clip) {
+    walk = THREE.AnimationUtils.subclip(clip, 'walk', 0, 64, 60);
+    idle = THREE.AnimationUtils.subclip(clip, 'idle', 75, 180, 60);
+    // Keep the walk in place: pin the hips' horizontal root motion to its first key.
+    for (const t of walk.tracks) {
+      if (!/Hips/i.test(t.name) || !t.name.endsWith('.position')) continue;
+      const v = t.values;
+      for (let i = 3; i < v.length; i += 3) { v[i] = v[0]; v[i + 2] = v[2]; }
+    }
+  }
+  return { template, walk, idle };
+}
+function prepMonsterAsset(gltf) {
+  gltf.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.material.side = THREE.FrontSide;
+    if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+  });
+  return { template: normalizeModel(gltf.scene, 2.7, Math.PI) };
+}
+async function loadAssets(onProgress) {
+  const prog = { s: 0, m: 0 };
+  const report = () => onProgress?.((prog.s + prog.m) / 2);
+  const pct = (key) => (e) => { if (e.total) { prog[key] = e.loaded / e.total; report(); } };
+  const [s, m] = await Promise.allSettled([
+    loadGLB('assets/survivor.glb', pct('s')).then(prepSurvivorAsset),
+    loadGLB('assets/monster.glb', pct('m')).then(prepMonsterAsset),
+  ]);
+  if (s.status === 'fulfilled') ASSETS.survivor = s.value; else console.warn('Survivor model failed to load, using fallback.', s.reason);
+  if (m.status === 'fulfilled') ASSETS.monster = m.value; else console.warn('Monster model failed to load, using fallback.', m.reason);
+  ASSETS.loaded = true;
+}
+
 function makeSurvivorAvatar(name, colorIdx) {
   const g = new THREE.Group();
   const rig = new THREE.Group(); g.add(rig);
+  if (ASSETS.survivor) {
+    const model = SkeletonUtils.clone(ASSETS.survivor.template);
+    rig.add(model);
+    const mixer = new THREE.AnimationMixer(model);
+    const acts = {};
+    if (ASSETS.survivor.walk) {
+      acts.walk = mixer.clipAction(ASSETS.survivor.walk); acts.idle = mixer.clipAction(ASSETS.survivor.idle);
+      acts.walk.play(); acts.idle.play(); acts.walk.setEffectiveWeight(0); acts.idle.time = Math.random() * 1.5;
+    }
+    g.userData.mixer = mixer; g.userData.acts = acts;
+    reg(g, 'entity');
+    const label = makeLabel(name); label.position.y = 2.05; g.add(label);
+    g.userData.rig = rig;
+    scene.add(g);
+    return g;
+  }
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.27, 0.75, 4, 12), new THREE.MeshStandardMaterial({ color: SURV_COLORS[colorIdx % SURV_COLORS.length], roughness: 0.85 }));
   body.position.y = 0.75;
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 16, 12), new THREE.MeshStandardMaterial({ color: 0xc89d78, roughness: 0.7 }));
@@ -582,6 +693,13 @@ function makeSurvivorAvatar(name, colorIdx) {
 function makeMonsterAvatar() {
   const g = new THREE.Group();
   const rig = new THREE.Group(); g.add(rig);
+  if (ASSETS.monster) {
+    rig.add(ASSETS.monster.template.clone(true));
+    reg(g, 'entity');
+    g.userData.rig = rig;
+    scene.add(g);
+    return g;
+  }
   const skin = new THREE.MeshStandardMaterial({ color: 0x1b1714, roughness: 0.65, metalness: 0.1 });
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 1.35, 6, 14), skin); body.position.y = 1.35; body.scale.set(1, 1, 0.75);
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 18, 14), skin); head.scale.set(0.85, 1.35, 1.1); head.position.set(0, 2.45, -0.12);
@@ -650,6 +768,7 @@ function startDrone(mode) {
   if (!audio.ctx) return;
   for (const n of audio.drone) { try { n.stop(); } catch (e) { /* already stopped */ } }
   audio.drone = [];
+  if (!mode) return;
   const freqs = mode === 'monster' ? [41, 41.6, 82.5] : [55, 55.7, 110.4, 164];
   const g = audio.ctx.createGain(); g.gain.value = mode === 'monster' ? 0.05 : 0.035;
   const f = audio.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 400;
@@ -855,7 +974,7 @@ function hostStart() {
     const c = tileCenter(t.x, t.z);
     const off = p.isMonster ? 0 : Math.floor((si - 1) / SPAWN_S.length);
     p.x = c.x + (off % 2) * 1.6; p.z = c.z + Math.floor(off / 2) * 1.6; p.ry = Math.random() * Math.PI * 2;
-    p.bot = p.isBot ? { path: [], wait: Math.random() * 2, mode: 'walk', modeT: 0 } : null;
+    p.bot = p.isBot ? newBrain(p) : null;
   });
   hs.phase = 'playing'; hs.timeLeft = CFG.DURATION; hs.gateOpen = false;
   hs.gens = GEN_TILES.map(() => ({ progress: 0, done: false }));
@@ -891,26 +1010,194 @@ function hostUpdate(dt) {
 }
 function hostBackToLobby() { hs.phase = 'lobby'; broadcastLobby(); }
 
-// Simple host-simulated bot survivors so the game is testable solo.
-function updateBot(p, dt) {
-  const b = p.bot;
-  b.modeT -= dt;
-  if (b.modeT <= 0) { const r = Math.random(); b.mode = r < 0.2 ? 'crouch' : r < 0.75 ? 'walk' : 'sprint'; b.modeT = 2 + Math.random() * 4; }
-  if (b.wait > 0) { b.wait -= dt; p.n = 0; return; }
-  if (!b.path.length) {
-    const from = { x: Math.floor(p.x / TILE), z: Math.floor(p.z / TILE) };
-    const to = FLOOR_TILES[Math.floor(Math.random() * FLOOR_TILES.length)];
-    b.path = bfsPath(from, to).slice(1);
-    if (!b.path.length) { b.wait = 1; return; }
+// ---------------- BOTS (simulated on the host) ----------------
+// Survivor bots sneak to generators, repair them, flee from the monster and run for
+// the exit. The monster bot hunts by sound only: it hears survivors within a radius
+// set by their noise level, investigates, and shrieks (sonar) when it loses the trail.
+const tileOf = (x, z) => ({ x: Math.floor(x / TILE), z: Math.floor(z / TILE) });
+function newBrain(p) {
+  return p.isMonster
+    ? { path: [], goalKey: '', repathT: 0, mode: 'patrol', target: null, preyId: null, hearT: 0, sonarCD: 10, attackCD: 0, wait: 1, stuckT: 0, lx: p.x, lz: p.z }
+    : { path: [], goalKey: '', repathT: 0, flee: 0, wait: Math.random() * 1.5, stamina: 1, stuckT: 0, lx: p.x, lz: p.z };
+}
+function botPathTo(p, b, tile, allowExit = false) {
+  const key = tile.x + ',' + tile.z;
+  if (key === b.goalKey && b.path.length && b.repathT > 0) return;
+  b.goalKey = key; b.repathT = 0.6;
+  b.path = bfsPath(tileOf(p.x, p.z), tile, allowExit).slice(1);
+}
+// Steps along the current path (or straight at `direct`). Returns true when it has arrived.
+function botStep(p, b, speed, r, dt, direct = null) {
+  b.repathT -= dt;
+  let tx, tz;
+  if (direct) { tx = direct.x; tz = direct.z; }
+  else {
+    if (!b.path.length) return true;
+    const c = tileCenter(b.path[0].x, b.path[0].z); tx = c.x; tz = c.z;
   }
-  const tgt = tileCenter(b.path[0].x, b.path[0].z);
-  const dx = tgt.x - p.x, dz = tgt.z - p.z, d = Math.hypot(dx, dz);
-  if (d < 0.4) { b.path.shift(); if (!b.path.length) b.wait = 0.5 + Math.random() * 3; return; }
-  const sp = CFG.SPEED[b.mode];
+  const dx = tx - p.x, dz = tz - p.z, d = Math.hypot(dx, dz);
+  if (d < 0.35) { if (!direct) b.path.shift(); return direct ? true : !b.path.length; }
+  const step = Math.min(d, speed * dt);
   const v = { x: p.x, z: p.z };
-  moveWithCollision(v, (dx / d) * sp * dt, (dz / d) * sp * dt, CFG.SURV_R);
-  p.x = v.x; p.z = v.z; p.ry = Math.atan2(-dx, -dz);
-  p.n = CFG.NOISE[b.mode]; p.c = b.mode === 'crouch' ? 1 : 0;
+  moveWithCollision(v, (dx / d) * step, (dz / d) * step, r);
+  p.x = v.x; p.z = v.z;
+  p.ry = angleDamp(p.ry, Math.atan2(-dx, -dz), 10, dt);
+  // Unstick: if barely moving for a second, drop the path so it gets recomputed.
+  b.stuckT = Math.hypot(p.x - b.lx, p.z - b.lz) < speed * dt * 0.2 ? b.stuckT + dt : 0;
+  b.lx = p.x; b.lz = p.z;
+  if (b.stuckT > 1) { b.path = []; b.goalKey = ''; b.stuckT = 0; }
+  return false;
+}
+function randomFloorTile() { return FLOOR_TILES[Math.floor(Math.random() * FLOOR_TILES.length)]; }
+function walkableNeighbour(t) {
+  for (const [dx, dz] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) if ('.SM'.includes(cell(t.x + dx, t.z + dz))) return { x: t.x + dx, z: t.z + dz };
+  return t;
+}
+function updateBot(p, dt) { if (p.isMonster) updateMonsterBot(p, dt); else updateSurvivorBot(p, dt); }
+
+function updateSurvivorBot(p, dt) {
+  const b = p.bot;
+  p.r = 0;
+  const mon = Object.values(hs.players).find((q) => q.isMonster && q.s === 'alive');
+  const dm = mon ? Math.hypot(mon.x - p.x, mon.z - p.z) : Infinity;
+
+  // Panic: the monster is close, so sprint to the far side of the map.
+  if (dm < 7 && b.flee <= 0) {
+    b.flee = 4 + Math.random() * 2;
+    let best = null, bestD = -1;
+    for (let i = 0; i < 14; i++) {
+      const t = randomFloorTile(), c = tileCenter(t.x, t.z);
+      const score = Math.hypot(c.x - mon.x, c.z - mon.z) - Math.hypot(c.x - p.x, c.z - p.z) * 0.3;
+      if (score > bestD) { bestD = score; best = t; }
+    }
+    b.goalKey = ''; botPathTo(p, b, best);
+  }
+  if (b.flee > 0) {
+    b.flee -= dt;
+    const sprint = b.stamina > 0.05;
+    b.stamina = clamp(b.stamina - (sprint ? dt / 4 : -dt * 0.15), 0, 1);
+    const mode = sprint ? 'sprint' : 'walk';
+    p.n = CFG.NOISE[mode]; p.c = 0;
+    if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt)) b.flee = 0;
+    return;
+  }
+  b.stamina = clamp(b.stamina + dt * 0.2, 0, 1);
+  if (b.wait > 0) { b.wait -= dt; p.n = 0; return; }
+
+  // Sneak when the monster is within earshot, otherwise walk.
+  const mode = dm < 16 ? 'crouch' : 'walk';
+  p.c = mode === 'crouch' ? 1 : 0;
+
+  if (hs.gateOpen) {
+    const exit = findTiles('X')[0];
+    botPathTo(p, b, exit, true);
+    p.n = CFG.NOISE[mode];
+    botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt);
+    if (cell(Math.floor(p.x / TILE), Math.floor(p.z / TILE)) === 'X') {
+      p.s = 'escaped';
+      broadcast({ t: 'event', k: 'escaped', id: p.id, name: p.name });
+    }
+    return;
+  }
+  // Nearest unfinished generator, preferring ones no other bot is already working on
+  let gi = -1, gd = Infinity, best = Infinity;
+  const taken = new Set(Object.values(hs.players).filter((q) => q !== p && q.bot && !q.isMonster && q.s === 'alive').map((q) => q.bot.gen));
+  hs.gens.forEach((g, i) => {
+    if (g.done) return;
+    const c = tileCenter(GEN_TILES[i].x, GEN_TILES[i].z), d = Math.hypot(c.x - p.x, c.z - p.z);
+    const score = d + (taken.has(i) ? 40 : 0);
+    if (score < best) { best = score; gd = d; gi = i; }
+  });
+  b.gen = gi;
+  if (gi < 0) { p.n = 0; return; }
+  if (gd < 2.3) {
+    // Repair at 60% of a human's speed so a hunting monster has time to interrupt.
+    p.r = 1; p.c = 0; p.n = CFG.NOISE.repair;
+    const c = tileCenter(GEN_TILES[gi].x, GEN_TILES[gi].z);
+    p.ry = Math.atan2(-(c.x - p.x), -(c.z - p.z));
+    hostRepair(p, gi, dt * 0.6);
+    return;
+  }
+  botPathTo(p, b, walkableNeighbour(GEN_TILES[gi]));
+  p.n = CFG.NOISE[mode];
+  if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) && gd >= 2.3) {
+    // Arrived next to the generator tile: shuffle in close.
+    const c = tileCenter(GEN_TILES[gi].x, GEN_TILES[gi].z);
+    botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt, c);
+  }
+}
+
+function updateMonsterBot(p, dt) {
+  const b = p.bot;
+  b.attackCD -= dt; b.sonarCD -= dt; b.hearT -= dt;
+  p.n = 0; p.c = 0; p.r = 0;
+  const prey = Object.values(hs.players).filter((q) => !q.isMonster && q.s === 'alive');
+
+  // Hearing: each survivor is audible within (noise × 24 m), plus a 2 m "touch" radius.
+  if (b.hearT <= 0) {
+    b.hearT = 0.2;
+    let best = null, bestScore = -Infinity;
+    for (const s of prey) {
+      const d = Math.hypot(s.x - p.x, s.z - p.z);
+      const radius = Math.max(2, s.n * 24);
+      if (d > radius) continue;
+      const score = radius - d;
+      if (score > bestScore) { bestScore = score; best = s; }
+    }
+    if (best) {
+      const d = Math.hypot(best.x - p.x, best.z - p.z);
+      const jitter = d * 0.08; // far sounds are vaguer
+      b.target = { x: best.x + (Math.random() - 0.5) * jitter, z: best.z + (Math.random() - 0.5) * jitter };
+      b.preyId = best.id;
+      b.mode = d < 9 ? 'chase' : 'investigate';
+      b.wait = 0;
+    }
+  }
+
+  // Strike anything within reach that is roughly in front.
+  for (const s of prey) {
+    const d = Math.hypot(s.x - p.x, s.z - p.z);
+    if (d < 1.9 && b.attackCD <= 0) {
+      const ry = Math.atan2(-(s.x - p.x), -(s.z - p.z));
+      p.ry = ry; b.attackCD = CFG.ATTACK_CD + 0.3;
+      hostAttack(p, ry);
+      if (s.s !== 'alive' || s.hp <= 0) { b.mode = 'patrol'; b.target = null; }
+      break;
+    }
+  }
+
+  if (b.mode === 'chase' && b.target) {
+    const d = Math.hypot(b.target.x - p.x, b.target.z - p.z);
+    const sameArea = d < 5;
+    if (!sameArea) botPathTo(p, b, tileOf(b.target.x, b.target.z));
+    if (botStep(p, b, 5.3, CFG.MON_R, dt, sameArea ? b.target : null)) b.mode = 'search';
+    return;
+  }
+  if (b.mode === 'investigate' && b.target) {
+    botPathTo(p, b, tileOf(b.target.x, b.target.z));
+    if (botStep(p, b, 4.4, CFG.MON_R, dt)) b.mode = 'search';
+    return;
+  }
+  if (b.mode === 'search') {
+    // Lost the trail: shriek to reveal nearby survivors, or give up and patrol.
+    if (b.sonarCD <= 0) {
+      b.sonarCD = 14;
+      broadcast({ t: 'event', k: 'sonar', by: p.id, x: p.x, z: p.z });
+      let near = null, nd = 26;
+      for (const s of prey) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < nd) { nd = d; near = s; } }
+      if (near) { b.target = { x: near.x, z: near.z }; b.preyId = near.id; b.mode = 'investigate'; b.goalKey = ''; return; }
+    }
+    b.mode = 'patrol'; b.wait = 1 + Math.random() * 1.5; b.path = []; b.goalKey = '';
+    return;
+  }
+  // Patrol: drift between generators (where survivors must go) and random rooms.
+  if (b.wait > 0) { b.wait -= dt; return; }
+  if (!b.path.length) {
+    const t = Math.random() < 0.6 ? walkableNeighbour(GEN_TILES[Math.floor(Math.random() * GEN_TILES.length)]) : randomFloorTile();
+    b.goalKey = ''; botPathTo(p, b, t);
+    if (!b.path.length) { b.wait = 0.5; return; }
+  }
+  if (botStep(p, b, 3.4, CFG.MON_R, dt)) b.wait = 0.5 + Math.random() * 2;
 }
 
 // ---------------- CLIENT HANDLING ----------------
@@ -934,6 +1221,7 @@ function onLobby(msg) {
   $('#menu-lobby').classList.remove('hidden');
   $('#room-code').textContent = msg.code;
   $('#host-controls').classList.toggle('hidden', !net.isHost);
+  $('#btn-lobby-menu').classList.toggle('hidden', !net.offline);
   $('#lobby-status').textContent = net.isHost ? (net.offline ? 'Offline practice: add bots, pick a role, start.' : 'Share the Room ID. Click a player to make them the monster.') : 'Waiting for host to start…';
   const ul = $('#player-list'); ul.innerHTML = '';
   for (const p of msg.players) {
@@ -977,6 +1265,7 @@ function onStart(msg) {
   $('#hud-monster').classList.toggle('hidden', !me.isMonster);
   initAudio(); startDrone(me.isMonster ? 'monster' : 'survivor');
   addFeed(me.isMonster ? 'You are blind. Listen for the ripples. Hunt.' : 'Repair the generators. Stay quiet. Escape.', me.isMonster ? 'good' : 'warn');
+  updateResumeOverlay();
   lockPointer();
 }
 function addRemote(p) {
@@ -1072,7 +1361,9 @@ function onEnd(msg) {
   $('#end-title').style.color = mine ? '' : '#ff3b3b';
   $('#end-reason').textContent = (mine ? 'Victory. ' : 'Defeat. ') + msg.reason;
   $('#end-stats').innerHTML = msg.stats.map((s) => `<li>${escapeHtml(s.name)} — ${s.s === 'escaped' ? 'escaped' : s.s === 'caught' ? 'taken' : 'survived'}</li>`).join('');
-  $('#btn-lobby').classList.toggle('hidden', !net.isHost);
+  $('#btn-lobby').classList.toggle('hidden', !net.isHost || quickRole !== null);
+  $('#btn-rematch').classList.toggle('hidden', quickRole === null);
+  $('#btn-menu').classList.toggle('hidden', !net.offline);
   $('#end-wait').classList.toggle('hidden', net.isHost);
   showScreen('end');
 }
@@ -1092,37 +1383,81 @@ function sendState(dt) {
 //  INPUT
 // ----------------------------------------------------------------------------
 const keys = {};
+// Look controls: pointer lock (mouse) when the browser grants it; otherwise "drag to look",
+// which is also what touch screens use. Movement and actions always come from the keyboard.
 let pointerLocked = false;
+let lookMode = 'lock'; // 'lock' | 'drag'
+const controlsActive = () => game.phase === 'playing' && (pointerLocked || lookMode === 'drag');
+function updateResumeOverlay() {
+  $('#resume').classList.toggle('hidden', game.phase !== 'playing' || pointerLocked || lookMode === 'drag');
+}
+function useDragLook() { lookMode = 'drag'; unlockPointer(); updateResumeOverlay(); }
+
 addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   keys[e.code] = true;
   if (game.phase !== 'playing') return;
   if (e.code === 'KeyF' && !me.isMonster) { flashlightOn = !flashlightOn; flashlight.visible = flashlightOn && viewMode === 'survivor'; tone({ f: 1800, dur: 0.03, vol: 0.05 }); }
   if (e.code === 'KeyQ') monsterSonar();
+  if (e.code === 'Space' && me.isMonster && !e.repeat) monsterAttack();
   if (e.code === 'KeyV' && !me.isMonster && me.status !== 'alive') setViewMode(viewMode === 'monster' ? 'survivor' : 'monster');
-  if (e.code === 'Space' || e.code === 'Tab') e.preventDefault();
+  if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
 });
 addEventListener('keyup', (e) => { keys[e.code] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
-function lockPointer() { if (game.phase === 'playing') canvas.requestPointerLock?.(); }
+function lockPointer() {
+  if (game.phase !== 'playing' || lookMode !== 'lock') return;
+  if (!canvas.requestPointerLock) { useDragLook(); return; }
+  try {
+    const r = canvas.requestPointerLock();
+    if (r && r.catch) r.catch(useDragLook);
+  } catch (e) { useDragLook(); }
+}
 function unlockPointer() { if (document.pointerLockElement) document.exitPointerLock(); }
 document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === canvas;
-  $('#resume').classList.toggle('hidden', pointerLocked || game.phase !== 'playing');
+  updateResumeOverlay();
 });
+document.addEventListener('pointerlockerror', useDragLook);
 $('#resume').addEventListener('click', () => { initAudio(); lockPointer(); });
-canvas.addEventListener('click', () => { if (!pointerLocked) lockPointer(); });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Locked mouse look
 document.addEventListener('mousemove', (e) => {
-  if (!pointerLocked || game.phase !== 'playing') return;
+  if (!pointerLocked || lookMode === 'drag' || game.phase !== 'playing') return;
   me.yaw -= e.movementX * 0.0022;
   me.pitch = clamp(me.pitch - e.movementY * 0.0022, -1.45, 1.45);
 });
-document.addEventListener('mousedown', (e) => {
-  if (!pointerLocked || game.phase !== 'playing') return;
-  if (e.button === 0) monsterAttack();
-  if (e.button === 2) monsterSonar();
+// Drag look (touch, or mouse when pointer lock is unavailable)
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => {
+  initAudio();
+  if (e.pointerType === 'touch' || e.pointerType === 'pen') useDragLook();
+  if (game.phase !== 'playing') return;
+  if (pointerLocked && e.pointerType === 'mouse') { if (e.button === 0) monsterAttack(); if (e.button === 2) monsterSonar(); return; }
+  if (lookMode === 'lock' && e.pointerType === 'mouse') { lockPointer(); return; }
+  if (e.button === 2) { monsterSonar(); return; }
+  if (drag) return; // ignore extra fingers
+  drag = { id: e.pointerId, x: null, y: null, moved: 0, type: e.pointerType }; // origin set on first move
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
 });
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (drag.x === null) { drag.x = e.clientX; drag.y = e.clientY; return; }
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY; drag.moved += Math.abs(dx) + Math.abs(dy);
+  const sens = drag.type === 'touch' ? 0.006 : 0.004;
+  me.yaw -= dx * sens;
+  me.pitch = clamp(me.pitch - dy * sens, -1.45, 1.45);
+});
+function endDrag(e) {
+  if (!drag || e.pointerId !== drag.id) return;
+  // A mouse click without dragging still strikes, so drag-look mice keep click-to-attack.
+  if (drag.type === 'mouse' && drag.moved < 6 && e.button === 0) monsterAttack();
+  drag = null;
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === drag.id) drag = null; });
 function monsterAttack() {
   if (!me.isMonster || me.status !== 'alive' || me.attackCD > 0) return;
   me.attackCD = CFG.ATTACK_CD; me.lunge = 1;
@@ -1151,7 +1486,7 @@ function updateLocal(dt) {
   me.damage = Math.max(0, me.damage - dt * 1.2);
   me.lunge = Math.max(0, me.lunge - dt * 4);
 
-  const ctrl = pointerLocked && game.phase === 'playing';
+  const ctrl = controlsActive();
   let fx = 0, fz = 0;
   if (ctrl) {
     if (keys.KeyW || keys.ArrowUp) fz -= 1;
@@ -1252,10 +1587,21 @@ function updateRemotes(dt) {
     a.position.copy(r.pos); a.rotation.y = r.yaw;
     r.walkT += dt * r.speed * 2.4;
     const rig = a.userData.rig;
-    rig.position.y = Math.abs(Math.sin(r.walkT)) * 0.05 * Math.min(r.speed, 2);
-    rig.scale.y = damp(rig.scale.y, r.crouch ? 0.65 : 1, 10, dt);
+    const mixer = a.userData.mixer, acts = a.userData.acts;
+    if (mixer && acts?.walk) {
+      // Blend idle <-> walk by speed; play the walk faster when sprinting.
+      const w = clamp(r.speed / 1.5, 0, 1);
+      acts.walk.setEffectiveWeight(w); acts.idle.setEffectiveWeight(1 - w);
+      acts.walk.timeScale = clamp(r.speed / 3.2, 0.5, 2);
+      mixer.update(dt);
+    } else rig.position.y = Math.abs(Math.sin(r.walkT)) * 0.05 * Math.min(r.speed, 2);
+    rig.scale.y = damp(rig.scale.y, r.crouch ? 0.68 : 1, 10, dt);
     if (r.isMonster) {
-      rig.rotation.x = 0.12 + Math.sin(time * 1.3) * 0.03;
+      // The monster model is static, so give it a hunched, lurching gait procedurally.
+      const gait = Math.min(r.speed, 6);
+      rig.rotation.x = 0.1 + gait * 0.025 + Math.sin(time * 1.3) * 0.03;
+      rig.rotation.z = Math.sin(r.walkT * 0.5) * 0.05 * Math.min(gait, 1.5);
+      rig.position.y = Math.abs(Math.sin(r.walkT * 0.5)) * 0.08 * Math.min(gait, 1.5) + Math.sin(time * 2) * 0.015;
       const al = rig.getObjectByName('armL'), ar = rig.getObjectByName('armR');
       if (al) { al.rotation.x = -0.25 + Math.sin(r.walkT) * 0.4; ar.rotation.x = -0.25 - Math.sin(r.walkT) * 0.4; }
     }
@@ -1381,7 +1727,7 @@ function showScreen(which) {
   $('#menu').classList.toggle('hidden', which !== 'menu');
   $('#hud').classList.toggle('hidden', which !== 'hud');
   $('#endscreen').classList.toggle('hidden', which !== 'end');
-  if (which !== 'hud') $('#resume').classList.add('hidden');
+  if (which !== 'hud') $('#resume').classList.add('hidden'); else updateResumeOverlay();
 }
 function menuStatus(text, err) { const s = $('#menu-status'); s.textContent = text; s.classList.toggle('err', !!err); }
 function fatal(msg) { game.phase = 'menu'; unlockPointer(); $('#fatal-msg').textContent = msg; $('#fatal').classList.remove('hidden'); }
@@ -1389,16 +1735,47 @@ function readName() { me.name = ($('#name-input').value.trim() || 'Survivor').sl
 try { $('#name-input').value = localStorage.getItem('blindsight-name') || ''; } catch (e) { /* storage unavailable */ }
 
 $('#btn-host').onclick = () => { initAudio(); readName(); hostCreate(false); };
-$('#btn-offline').onclick = () => { initAudio(); readName(); hostCreate(true); };
+$('#btn-offline').onclick = () => { quickRole = null; initAudio(); readName(); hostCreate(true); };
 $('#btn-join').onclick = () => { initAudio(); readName(); joinRoom($('#code-input').value); };
 $('#code-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-join').click(); });
 $('#btn-copy').onclick = () => navigator.clipboard?.writeText(net.code);
 $('#btn-start').onclick = () => { initAudio(); hostStart(); };
 $('#btn-random-monster').onclick = () => { const humans = Object.values(hs.players).filter((p) => !p.isBot); setMonster(humans[Math.floor(Math.random() * humans.length)].id); };
 let botN = 1;
-$('#btn-add-bot').onclick = () => { const id = 'bot-' + botN; hs.players[id] = newHostPlayer(id, 'Bot ' + botN++, false, true); broadcastLobby(); };
+function addBot(isMonster) {
+  if (isMonster) for (const p of Object.values(hs.players)) p.isMonster = false; // only one monster
+  const id = 'bot-' + botN;
+  hs.players[id] = newHostPlayer(id, isMonster ? 'The Wendigo' : 'Bot ' + botN, isMonster, true);
+  botN++;
+}
+$('#btn-add-bot').onclick = () => { addBot(false); broadcastLobby(); };
+$('#btn-add-bot-monster').onclick = () => { addBot(true); broadcastLobby(); };
+// Quick play: an offline match against bots, starting straight away.
+let quickRole = null; // role of the last vs-bot match, for Rematch
+function playVsBots(asMonster) {
+  quickRole = asMonster;
+  initAudio(); readName();
+  hostCreate(true);
+  hs.players[me.id].isMonster = asMonster;
+  if (asMonster) { addBot(false); addBot(false); } else addBot(true);
+  hostStart();
+}
+$('#btn-bot-survivor').onclick = () => playVsBots(false);
+$('#btn-bot-monster').onclick = () => playVsBots(true);
 $('#btn-clear-bots').onclick = () => { for (const p of Object.values(hs.players)) if (p.isBot) delete hs.players[p.id]; broadcastLobby(); };
 $('#btn-lobby').onclick = () => hostBackToLobby();
+// Offline only: drop back to the main menu without a page reload.
+function backToMenu() {
+  leaveMatch();
+  game.phase = 'menu'; net.isHost = false; net.offline = false; quickRole = null;
+  hs.phase = 'lobby'; hs.players = {};
+  clearRipples(); setViewMode('monster'); startDrone(null);
+  showScreen('menu');
+  $('#menu-main').classList.remove('hidden'); $('#menu-lobby').classList.add('hidden');
+}
+$('#btn-menu').onclick = backToMenu;
+$('#btn-lobby-menu').onclick = backToMenu;
+$('#btn-rematch').onclick = () => playVsBots(quickRole);
 
 addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
@@ -1413,6 +1790,14 @@ monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
 // ----------------------------------------------------------------------------
 buildWorld();
 setViewMode('monster');
+
+// Embedded pages (the Claude artifact build) can't use WebRTC, so hide online play there.
+const EMBEDDED = !!window.BLINDSIGHT_EMBED;
+if (EMBEDDED) { $('#online-group').classList.add('hidden'); $('#embed-note').classList.remove('hidden'); }
+loadAssets((f) => menuStatus(`Loading models… ${Math.round(f * 100)}%`)).finally(() => {
+  menuStatus(ASSETS.survivor && ASSETS.monster ? '' : 'Some models failed to load; using simple stand-ins.', !(ASSETS.survivor && ASSETS.monster));
+  for (const id of ['#btn-bot-survivor', '#btn-bot-monster', '#btn-host', '#btn-offline', '#btn-join']) $(id).disabled = false;
+});
 
 function animate() {
   requestAnimationFrame(animate);
@@ -1437,4 +1822,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, hostUpdate };

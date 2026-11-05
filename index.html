@@ -27,16 +27,30 @@
       <p class="tagline">It cannot see you. It can hear you.</p>
 
       <div id="menu-main">
-        <label>Your name <input id="name-input" maxlength="16" placeholder="Survivor" /></label>
-        <div class="row">
-          <button id="btn-host" class="primary">Host room</button>
-          <button id="btn-offline">Practice offline</button>
+        <label for="name-input">Your name <input id="name-input" maxlength="16" placeholder="Survivor" /></label>
+
+        <div class="group">
+          <div class="group-label">Play vs bot</div>
+          <div class="row">
+            <button id="btn-bot-survivor" class="primary" disabled>Play as survivor</button>
+            <button id="btn-bot-monster" class="primary" disabled>Play as monster</button>
+          </div>
+          <p class="muted">As survivor you face a bot monster that hunts by sound. As monster you hunt two bot survivors.</p>
         </div>
-        <div class="row">
-          <input id="code-input" maxlength="6" placeholder="ROOM ID" />
-          <button id="btn-join">Join</button>
+
+        <div class="group" id="online-group">
+          <div class="group-label">Online (peer-to-peer)</div>
+          <div class="row">
+            <button id="btn-host" disabled>Host room</button>
+            <button id="btn-offline" disabled>Custom offline lobby</button>
+          </div>
+          <div class="row">
+            <input id="code-input" maxlength="6" placeholder="ROOM ID" />
+            <button id="btn-join" disabled>Join</button>
+          </div>
         </div>
-        <p id="menu-status" class="status"></p>
+        <p id="embed-note" class="muted hidden">Online rooms need WebRTC, which this embedded page can't use. Open the game's index.html from a web server to host or join a room.</p>
+        <p id="menu-status" class="status">Loading models…</p>
       </div>
 
       <div id="menu-lobby" class="hidden">
@@ -46,9 +60,11 @@
           <div class="row">
             <button id="btn-random-monster" class="small">Random monster</button>
             <button id="btn-add-bot" class="small">Add bot survivor</button>
+            <button id="btn-add-bot-monster" class="small">Add bot monster</button>
             <button id="btn-clear-bots" class="small">Remove bots</button>
           </div>
           <button id="btn-start" class="primary wide">Start game</button>
+          <button id="btn-lobby-menu" class="wide hidden">Main menu</button>
         </div>
         <p id="lobby-status" class="status">Waiting for host to start…</p>
       </div>
@@ -65,11 +81,12 @@
           <div>
             <h3>The Monster</h3>
             <p>You are blind. The world is a dim green grid. Sound lights it up: footsteps send out ripples across the lines.</p>
-            <p><kbd>LMB</kbd> attack · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> charge.</p>
+            <p><kbd>LMB</kbd> or <kbd>Space</kbd> attack · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> charge.</p>
           </div>
         </div>
-        <p class="muted"><kbd>WASD</kbd> move · mouse look · click to lock the cursor · <kbd>V</kbd> toggles monster-vision while spectating.</p>
+        <p class="muted"><kbd>WASD</kbd> or arrow keys move. Look with the mouse (click to lock the cursor), or drag on the screen to look with a mouse or touch. <kbd>V</kbd> toggles monster vision while spectating.</p>
       </details>
+      <p class="credits">Models (CC BY 4.0): <a href="https://sketchfab.com/3d-models/survivor-toon-style-5aa13349079141d0927b8ea96e1349c4" target="_blank" rel="noopener">Survivor [Toon-Style]</a> by lalit · <a href="https://sketchfab.com/3d-models/wendigo-inspired-by-until-dawn-d46093a707a24444af1ed7d10aa7198f" target="_blank" rel="noopener">Wendigo</a> by marc3_C. The wendigo was simplified for the web.</p>
     </div>
   </div>
 
@@ -105,7 +122,11 @@
       <h1 id="end-title" class="title">—</h1>
       <p id="end-reason"></p>
       <ul id="end-stats"></ul>
-      <button id="btn-lobby" class="primary hidden">Back to lobby</button>
+      <div class="row end-actions">
+        <button id="btn-rematch" class="primary hidden">Rematch</button>
+        <button id="btn-lobby" class="primary hidden">Back to lobby</button>
+        <button id="btn-menu" class="hidden">Main menu</button>
+      </div>
       <p id="end-wait" class="status">Waiting for host…</p>
     </div>
   </div>

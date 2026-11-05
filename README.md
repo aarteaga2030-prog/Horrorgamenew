@@ -2,7 +2,7 @@
 
 An asymmetric, peer-to-peer survival horror game for the browser. One player is a **blind monster**; everyone else is a **survivor** trying to escape.
 
-- **Three.js** (r160) renders the game; there are no external assets, and all textures and sounds are generated at runtime.
+- **Three.js** (r160) renders the game. The two characters are glTF models (see *Assets*); the environment textures and all sounds are generated at runtime.
 - **PeerJS** handles networking: one player hosts a room and the others join with a 5-character Room ID.
 - There is no build step. Open it with any static file server.
 
@@ -19,12 +19,19 @@ python3 -m http.server 8000
 |---|---|---|
 | Goal | Repair all 3 generators (hold **E**) to open the exit gate, then escape. Or stay alive until the 5:00 timer runs out. | Catch every survivor (2 hits each). |
 | Sees | A normally lit 3D facility, plus a flashlight (**F**). | A dark green wireframe grid. The world is almost invisible until sound lights it up. |
-| Movement | **WASD** + mouse. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** + mouse. **Shift** charge. |
-| Abilities | Repairing hums, which also makes noise. | **LMB** strike. **Q** / **RMB** sonar shriek (reveals everything nearby; survivors hear it). |
+| Movement | **WASD** / arrows. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** / arrows. **Shift** charge. |
+| Abilities | Repairing hums, which also makes noise. | **LMB** or **Space** strike. **Q** / **RMB** sonar shriek (reveals everything nearby; survivors hear it). |
+
+**Looking around:** click the game to lock the mouse cursor. If the browser won't allow pointer lock, or on a touch screen, drag across the screen to look instead. Touch is only for looking; movement and actions always come from the keyboard.
 
 Caught or escaped survivors become free-flying spectators and can press **V** to switch to monster vision.
 
-**Practice offline** runs the game without any network. You can add bot survivors that wander around making noise, which is a good way to try out the monster view on your own.
+### Playing against bots
+**Play vs bot** starts an offline match straight away:
+- **Play as survivor**: a bot monster hunts you. It's blind too. It hears you within a radius set by your noise (sprinting ≈ 24 m, walking ≈ 12 m, crouching ≈ 3.6 m), investigates what it heard, and shrieks to reveal you when it loses the trail.
+- **Play as monster**: two bot survivors sneak between generators, crouch when you're near, sprint away when you get close, and run for the exit once the gate opens.
+
+**Custom offline lobby** lets you mix any number of bot survivors with a human or bot monster.
 
 ## How it works
 
@@ -50,7 +57,30 @@ By default, PeerJS uses its free public cloud server. To use your own [PeerServe
 
 Peer-to-peer connections need STUN to get through NAT. Some strict networks also need a TURN server, which you'd have to add to `peerOptions()`.
 
+## Assets
+| File | What it is |
+|---|---|
+| `assets/survivor.glb` | [Survivor [Toon-Style]](https://sketchfab.com/3d-models/survivor-toon-style-5aa13349079141d0927b8ea96e1349c4) by lalit (CC BY 4.0). Skinned, with one "Walk + Idle" clip that the game splits into a walk loop and an idle loop. |
+| `assets/monster.glb` | Game-ready version of [Wendigo](https://sketchfab.com/3d-models/wendigo-inspired-by-until-dawn-d46093a707a24444af1ed7d10aa7198f) by marc3_C (CC BY 4.0), built by `tools/optimize-monster.mjs`: 23 MB → 1.9 MB, its T-posed arms bent down to hang, textures at 1024 px WebP. |
+| `assets/source/wendigo-original.glb` | The original wendigo upload, kept as the source for the optimizer. |
+
+Notes:
+- **Survivor file:** as uploaded, it is truncated (its ambient-occlusion texture runs past the end of the file), so the reference to that texture was removed.
+- **Survivor material:** it uses the spec-gloss material extension, which three.js no longer reads, so the game re-applies its diffuse texture in code.
+- **Monster animation:** the wendigo has no skeleton, so its gait (hunch, sway, bob) is procedural.
+
+## Playtest build (Claude artifact)
+`play.html` is an embeddable copy of the page used to publish a playtest build as a Claude artifact. Regenerate it after editing `index.html`:
+
+```bash
+python3 tools/build-play.py   # writes play.html and build/assets/*.glb.json
+```
+
+The artifact host serves only web file types, so the build wraps each `.glb` as base64 inside a `.json` file, and `game.js` decodes it when `window.BLINDSIGHT_EMBED` is set. Embedded pages can't use WebRTC, so the artifact build plays against bots only and hides online rooms.
+
 ## Files
 - `index.html`: the page layout, CDN imports (import map for Three.js, a script tag for PeerJS), the menu and the HUD.
 - `style.css`: the UI styling.
-- `game.js`: everything else, including the map, rendering, shaders, networking, gameplay, audio and bots.
+- `game.js`: everything else, including the map, rendering, shaders, model loading, networking, gameplay, audio and bot AI.
+- `play.html`: the generated artifact build (see above).
+- `tools/`: `build-play.py` (artifact build) and `optimize-monster.mjs` (model pipeline).
