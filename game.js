@@ -277,6 +277,9 @@ const SONAR_VERT = /* glsl */ `
     vNormalW = normalize(mat3(modelMatrix) * objectNormal);
     gl_Position = projectionMatrix * viewMatrix * wp;
   }`;
+// Flat, unlit output: each surface is just "how much sound is touching it". The echo
+// post pass (below) turns this into outlines and halftone, so the monster sees a flat,
+// drawn image rather than lit 3D surfaces.
 const SONAR_FRAG = /* glsl */ `
   uniform float uTime;
   uniform vec3 uCamPos;
@@ -284,30 +287,19 @@ const SONAR_FRAG = /* glsl */ `
   uniform vec3 uRipP[MAXR];
   uniform float uBase;      // ambient visibility of this surface (env is barely visible)
   uniform float uGain;      // how strongly ripples light this surface
-  uniform float uGrid;      // grid cell size in metres
+  uniform float uGrid;      // (unused in the echo view; kept for material compatibility)
   uniform float uNearGain;  // faint "touch" sense right around the monster
   uniform vec3 uColor;
-  uniform float uSelf;      // 1 = this surface's own look; 0 = indistinguishable from the environment
+  uniform float uSelf;      // survivors: 1 while making noise, 0 = not drawn at all
   varying vec3 vWorld;
   varying vec3 vNormalW;
 
-  float gridLine(vec2 c) {
-    vec2 d = fwidth(c);
-    vec2 g = abs(fract(c - 0.5) - 0.5) / max(d, vec2(1e-4));
-    return 1.0 - min(min(g.x, g.y), 1.0);
-  }
-
   void main() {
-    vec3 n = normalize(vNormalW);
-    vec3 an = abs(n);
-    // Triplanar-ish projection: pick the plane most aligned with the surface.
-    vec2 uv = an.y > 0.5 ? vWorld.xz : (an.x > an.z ? vWorld.zy : vWorld.xy);
-    float grid = mix(1.0, uGrid, uSelf);
-    float minor = gridLine(uv / grid) * 0.65;
-    float major = gridLine(uv / (grid * 4.0));
-    float lines = max(minor, major);
-
-    // Accumulate expanding spherical shells from every active ripple.
+    // Silent survivors dissolve out completely (dithered so the fade isn't a pop).
+    if (uSelf < 0.999) {
+      float h = fract(sin(dot(floor(gl_FragCoord.xy), vec2(12.9898, 78.233))) * 43758.5453);
+      if (h >= uSelf) discard;
+    }
     float energy = 0.0;
     for (int i = 0; i < MAXR; i++) {
       vec4 r = uRip[i];
@@ -319,21 +311,15 @@ const SONAR_FRAG = /* glsl */ `
       float d = distance(vWorld, r.xyz);
       float w = 0.3 + rad * 0.06;
       float ring = exp(-pow((d - rad) / w, 2.0));
-      float fill = (1.0 - smoothstep(0.0, rad + 0.001, d)) * 0.08;
+      float fill = (1.0 - smoothstep(0.0, rad + 0.001, d)) * 0.04;
       float fade = 1.0 - rad / p.x;
       fade *= fade;
       energy += (ring + fill) * fade * p.y;
     }
-
     float dc = distance(vWorld, uCamPos);
-    float base = mix(0.05, uBase, uSelf) * (1.0 - smoothstep(8.0, 45.0, dc));
-    float near = (1.0 - smoothstep(0.0, 5.0, dc)) * mix(0.22, uNearGain, uSelf);
-    float I = base + energy * mix(1.0, uGain, uSelf) + near;
-
-    vec3 V = normalize(uCamPos - vWorld);
-    float fres = pow(1.0 - abs(dot(V, n)), 2.5);
-    vec3 col = mix(vec3(0.169, 1.0, 0.478), uColor, uSelf) * (lines * I * 1.8 + I * 0.025 + fres * I * 0.22);
-    gl_FragColor = vec4(col, 1.0);
+    float base = uBase * (1.0 - smoothstep(8.0, 45.0, dc));
+    float near = (1.0 - smoothstep(0.0, 5.0, dc)) * uNearGain;
+    gl_FragColor = vec4(uColor * (base + energy * uGain + near), 1.0);
   }`;
 function makeSonarMaterial({ base, gain, grid, near, color }) {
   return new THREE.ShaderMaterial({
@@ -346,9 +332,9 @@ function makeSonarMaterial({ base, gain, grid, near, color }) {
     fragmentShader: SONAR_FRAG,
   });
 }
-const ENTITY_SONAR = { base: 0.0, gain: 2.6, grid: 0.2, near: 0.35, color: 0x9bffc4 };
+const ENTITY_SONAR = { base: 0.25, gain: 2.6, grid: 0.2, near: 0.35, color: 0xd8fff0 };
 const SONAR_MATS = {
-  env: makeSonarMaterial({ base: 0.05, gain: 1.0, grid: 1.0, near: 0.22, color: 0x2bff7a }),
+  env: makeSonarMaterial({ base: 0.06, gain: 1.0, grid: 1.0, near: 0.25, color: 0x2bff7a }),
   gen: makeSonarMaterial({ base: 0.35, gain: 1.0, grid: 0.25, near: 0.3, color: 0xb4ff3b }),   // objectives faintly visible
   entity: makeSonarMaterial({ base: 0.0, gain: 2.6, grid: 0.2, near: 0.35, color: 0x9bffc4 }), // players: ONLY visible via noise
 };
@@ -411,7 +397,7 @@ const SonarPostShader = {
       col += vec3(0.0, 0.035, 0.015) * hash(uv * (uTime + 1.0));
       float vig = smoothstep(0.85, 0.2, length(c));
       col *= vig;
-      col += vec3(0.0, 0.18, 0.08) * uPulse * (1.0 - vig * 0.5);
+      col += vec3(0.0, 0.08, 0.04) * uPulse * (1.0 - vig * 0.5);
       if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) col = vec3(0.0);
       gl_FragColor = vec4(col, 1.0);
     }`,
@@ -437,17 +423,55 @@ const SurvivorPostShader = {
       gl_FragColor = vec4(col, 1.0);
     }`,
 };
-function buildComposer(passShader, bloom) {
+const EchoShader = {
+  uniforms: { tDiffuse: { value: null }, tDepth: { value: null }, uRes: { value: new THREE.Vector2(1, 1) }, uNear: { value: 0.05 }, uFar: { value: 400 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: /* glsl */ `
+    #include <packing>
+    uniform sampler2D tDiffuse; uniform sampler2D tDepth; uniform vec2 uRes; uniform float uNear; uniform float uFar;
+    varying vec2 vUv;
+    float lin(vec2 uv) { return -perspectiveDepthToViewZ(texture2D(tDepth, uv).x, uNear, uFar); }
+    float lum(vec2 uv) { vec3 c = texture2D(tDiffuse, uv).rgb; return max(c.r, max(c.g, c.b)); }
+    void main() {
+      vec2 px = 1.0 / uRes;
+      // Ink: second derivative of linear depth catches silhouettes and creases.
+      float d = lin(vUv);
+      float dl = lin(vUv - vec2(px.x, 0.0)), dr = lin(vUv + vec2(px.x, 0.0));
+      float du = lin(vUv + vec2(0.0, px.y)), dd = lin(vUv - vec2(0.0, px.y));
+      float edge = smoothstep(0.015, 0.06, (abs(dl + dr - 2.0 * d) + abs(du + dd - 2.0 * d)) / max(d, 0.5));
+      edge = max(edge, smoothstep(0.08, 0.3, abs(dl - dr) / max(d, 0.5) + abs(du - dd) / max(d, 0.5)));
+      // Sound light around this pixel (so outlines glow where a ripple touches them)
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      float L = max(c.r, max(c.g, c.b));
+      float Ln = max(L, max(max(lum(vUv + vec2(px.x * 2.0, 0.0)), lum(vUv - vec2(px.x * 2.0, 0.0))), max(lum(vUv + vec2(0.0, px.y * 2.0)), lum(vUv - vec2(0.0, px.y * 2.0)))));
+      // Halftone fill: dot size follows brightness, like a printed sonar plate.
+      vec2 cell = mod(floor(gl_FragCoord.xy), 5.0) - 2.0;
+      float dotOn = step(length(cell) / 2.6, sqrt(clamp(L * 1.6, 0.0, 1.0)));
+      float far = 1.0 - smoothstep(25.0, 70.0, d);
+      float ink = edge * (0.07 * far + Ln * 2.0);
+      vec3 hue = L > 1e-4 ? c / L : vec3(0.17, 1.0, 0.48);
+      vec3 col = hue * (ink + dotOn * min(L * 1.4, 1.0) * 0.32);
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+};
+// ShaderPass that also hands the scene depth (from the render target) to the shader.
+class DepthShaderPass extends ShaderPass {
+  render(r, writeBuffer, readBuffer, dt, mask) { this.uniforms.tDepth.value = readBuffer.depthTexture; super.render(r, writeBuffer, readBuffer, dt, mask); }
+}
+function buildComposer(passShader, bloom, echo = false) {
   const comp = new EffectComposer(renderer);
+  if (echo) { comp.renderTarget1.depthTexture = new THREE.DepthTexture(); comp.renderTarget2.depthTexture = new THREE.DepthTexture(); }
   comp.addPass(new RenderPass(scene, camera));
+  let echoPass = null;
+  if (echo) { echoPass = new DepthShaderPass(EchoShader); comp.addPass(echoPass); }
   let bloomPass = null;
   if (bloom) { bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.85, 0.5, 0.03); comp.addPass(bloomPass); }
   const pass = new ShaderPass(passShader);
   comp.addPass(pass);
   comp.addPass(new OutputPass());
-  return { comp, pass, bloomPass };
+  return { comp, pass, bloomPass, echoPass };
 }
-const monsterPost = buildComposer(SonarPostShader, true);
+const monsterPost = buildComposer(SonarPostShader, true, true);
 const survivorPost = buildComposer(SurvivorPostShader, false);
 
 // ----------------------------------------------------------------------------
@@ -944,101 +968,148 @@ function prepMonsterAsset(gltf) {
 //   arms: `lower` drops the arm from the T-pose, `fwd` swings it forward/up,
 //         `elbow`/`curl` bend the forearm/claws forward
 //   legs: thigh -x swings forward, knee +x bends, foot +x points the toes down
+// Motion is layered from several harmonics of each clip's length (so loops stay
+// seamless) with irregular phases, which reads as organic rather than mechanical.
 const SIDES = [['L', 1], ['R', -1]];
+const TAU = Math.PI * 2;
+// Loop-safe "noise": a sum of harmonics of period T with fixed, uneven phases.
+function wob(t, T, seed, amp = 1) {
+  const w = (TAU * t) / T;
+  return amp * (Math.sin(w + seed * 1.7) * 0.5 + Math.sin(2 * w + seed * 3.1) * 0.3 + Math.sin(3 * w + seed * 5.3) * 0.2);
+}
+// A sharp twitch at time c (seconds) inside a loop of length T: fast attack, slow release.
+function twitch(t, c, T, amp, attack = 0.05, release = 0.35) {
+  let d = t - c; if (d < -T / 2) d += T; if (d > T / 2) d -= T;
+  if (d < -attack || d > release) return 0;
+  return amp * (d < 0 ? 1 + d / attack : Math.pow(1 - d / release, 2));
+}
 function basePose() {
-  const p = { Hips: [0, 0, 0], Spine: [0.22, 0, 0], Chest: [0.18, 0, 0], Neck: [-0.12, 0, 0], Head: [-0.1, 0, 0], hips: [0, -0.06, 0] };
+  const p = { Hips: [0, 0, 0], Spine: [0.32, 0, 0], Chest: [0.24, 0, 0], Neck: [-0.25, 0, 0], Head: [-0.12, 0, 0], hips: [0, -0.09, 0] };
   for (const [S] of SIDES) { p['Clavicle' + S] = [0, 0, 0]; p['Toe' + S] = [0, 0, 0]; }
   setArm(p, 'L', {}); setArm(p, 'R', {}); setLeg(p, 'L', {}); setLeg(p, 'R', {});
   return p;
 }
-function setArm(p, S, { lower = 1.3, fwd = 0.25, elbow = 0.35, curl = 0.3, twist = 0 } = {}) {
+function setArm(p, S, { lower = 1.32, fwd = 0.3, elbow = 0.4, curl = 0.35, twist = 0, shrug = 0 } = {}) {
   const s = S === 'L' ? 1 : -1;
+  p['Clavicle' + S] = [0, 0, s * shrug];
   p['UpperArm' + S] = [-fwd, twist * s, -s * lower];
   p['Forearm' + S] = [0, -s * elbow, 0];
   p['Hand' + S] = [0, -s * curl * 0.4, 0];
   p['Claws' + S] = [0, -s * curl, 0];
 }
-function setLeg(p, S, { thigh = -0.22, knee = 0.42, foot = -0.18, splay = 0 } = {}) {
+function setLeg(p, S, { thigh = -0.28, knee = 0.5, foot = -0.2, splay = 0 } = {}) {
   const s = S === 'L' ? 1 : -1;
   p['UpLeg' + S] = [thigh, 0, s * splay];
   p['Leg' + S] = [knee, 0, 0];
   p['Foot' + S] = [foot, 0, 0];
 }
-const TAU = Math.PI * 2;
-function gaitPose(t, T, k) {
-  // k: 0 = walk, 1 = run. One stride per T seconds; legs in antiphase.
-  const p = basePose(), ph = (t / T) * TAU;
-  p.Spine[0] = lerp(0.3, 0.62, k); p.Chest[0] = lerp(0.18, 0.3, k); p.Neck[0] = lerp(-0.2, -0.45, k);
-  p.Spine[1] = Math.sin(ph) * lerp(0.12, 0.2, k); p.Chest[1] = -Math.sin(ph) * lerp(0.08, 0.14, k);
-  p.Head[2] = Math.sin(ph) * 0.05;
+function idlePose(t) {
+  // 6 s loop: ragged breathing, shoulders heaving, a slow head scan that stalls and
+  // snaps, fingers flexing out of step with each other.
+  const T = 6, p = basePose(), br = Math.sin((TAU * t) / T * 3) * 0.5 + 0.5; // three breaths per loop
+  p.Chest[0] += br * 0.06; p.Spine[0] += wob(t, T, 1, 0.03);
+  p.Spine[2] = wob(t, T, 2, 0.05); p.Chest[1] = wob(t, T, 3, 0.06);
+  p.Head[1] = wob(t, T, 4, 0.45) + twitch(t, 2.1, T, 0.5) - twitch(t, 4.4, T, 0.35);
+  p.Head[2] = wob(t, T, 5, 0.2) + twitch(t, 2.15, T, 0.55, 0.04, 0.6);
+  p.Neck[0] += wob(t, T, 6, 0.08) - twitch(t, 3.3, T, 0.3);
   for (const [S, s] of SIDES) {
-    const q = ph + (s > 0 ? 0 : Math.PI), sw = Math.sin(q);
-    setLeg(p, S, {
-      thigh: -0.25 - sw * lerp(0.5, 0.95, k),
-      knee: lerp(0.35, 0.55, k) + Math.max(0, Math.cos(q)) * lerp(0.8, 1.5, k),
-      foot: -0.15 + sw * 0.3,
-    });
-    setArm(p, S, { lower: lerp(1.25, 1.1, k), fwd: lerp(0.3, 0.75, k) + sw * lerp(0.45, 0.8, k), elbow: lerp(0.4, 0.8, k), curl: 0.35 });
+    setArm(p, S, { fwd: 0.3 + wob(t, T, 7 + s, 0.08), elbow: 0.4 + wob(t, T, 9 + s, 0.1), curl: 0.35 + wob(t * 2, T, 11 + s, 0.3) + twitch(t, s > 0 ? 1.2 : 4.9, T, -0.6), shrug: br * 0.08 });
+    setLeg(p, S, { thigh: -0.28 + s * wob(t, T, 13, 0.04), knee: 0.5 + wob(t, T, 14 + s, 0.05) });
   }
-  p.hips = [0, lerp(-0.08, -0.16, k) + Math.cos(ph * 2) * lerp(0.035, 0.07, k), 0];
+  p.hips = [wob(t, T, 15, 0.025), -0.09 + br * 0.01, 0];
   return p;
 }
-function idlePose(t) {
-  const p = basePose(), b = Math.sin((t / 3.2) * TAU);
-  p.Chest[0] += b * 0.04; p.Spine[0] += b * 0.02;
-  // Slow head sweep with a sudden twitch, like it's listening.
-  p.Head[1] = Math.sin((t / 3.2) * TAU) * 0.3; p.Head[2] = t > 1.9 && t < 2.2 ? 0.35 : 0.05;
-  for (const [S, s] of SIDES) setArm(p, S, { fwd: 0.25 + b * 0.05 * s, curl: 0.3 + Math.sin(t * 3 + s) * 0.15 });
-  p.hips[1] = -0.06 + b * 0.01;
+function walkPose(t) {
+  // 1.25 s stride with a limp (right leg drags), a lurching torso, arms swinging late
+  // and loose, claws trailing, while the head stays eerily level.
+  const T = 1.25, p = basePose(), ph = (t / T) * TAU;
+  p.Spine[0] = 0.42 + Math.sin(ph * 2) * 0.05; p.Chest[0] = 0.22;
+  p.Spine[1] = Math.sin(ph) * 0.14; p.Chest[1] = -Math.sin(ph - 0.4) * 0.12;
+  p.Spine[2] = Math.sin(ph) * 0.08; p.Chest[2] = -Math.sin(ph + 0.6) * 0.07; // shoulder roll
+  p.Neck[0] = -0.38 - Math.sin(ph * 2) * 0.05; p.Neck[1] = -Math.sin(ph) * 0.12; // counter-rotate: head stays put
+  p.Head[2] = Math.sin(ph + 1) * 0.08 + wob(t, T, 3, 0.04);
+  for (const [S, s] of SIDES) {
+    const q = ph + (s > 0 ? 0 : Math.PI), sw = Math.sin(q), limp = s > 0 ? 1 : 0.65;
+    setLeg(p, S, { thigh: -0.3 - sw * 0.55 * limp, knee: 0.45 + Math.max(0, Math.cos(q)) * 0.85 * limp, foot: -0.15 + sw * 0.3 });
+    const lag = Math.sin(q - 0.7); // arms follow through behind the legs
+    setArm(p, S, { lower: 1.3, fwd: 0.35 + lag * 0.45, elbow: 0.45 + Math.max(0, -lag) * 0.35, curl: 0.4 + Math.max(0, lag) * 0.3, twist: lag * 0.15 });
+  }
+  p.hips = [Math.sin(ph) * 0.03, -0.11 + Math.cos(ph * 2) * 0.045 - (Math.cos(ph) > 0.8 ? 0.02 : 0), 0];
+  return p;
+}
+function gallopPose(t) {
+  // 0.62 s all-fours gallop: torso pitched nearly flat, long arms clawing at the ground
+  // in front, legs driving behind, head craned up to keep looking ahead.
+  const T = 0.62, p = basePose(), ph = (t / T) * TAU;
+  p.Spine[0] = 1.05 + Math.sin(ph) * 0.12; p.Chest[0] = 0.35 + Math.sin(ph + 0.8) * 0.1;
+  p.Neck[0] = -1.05 - Math.sin(ph) * 0.1; p.Head[0] = -0.35; p.Head[2] = Math.sin(ph) * 0.06;
+  p.Spine[1] = Math.sin(ph) * 0.08;
+  for (const [S, s] of SIDES) {
+    const qa = ph + (s > 0 ? 0 : 0.5), qb = ph + Math.PI + (s > 0 ? 0 : 0.5); // arms lead, legs push
+    setArm(p, S, { lower: 1.25, fwd: 1.35 + Math.sin(qa) * 0.55, elbow: 0.25 + Math.max(0, Math.cos(qa)) * 0.6, curl: 0.55 + Math.max(0, -Math.sin(qa)) * 0.4 });
+    setLeg(p, S, { thigh: -0.75 - Math.sin(qb) * 0.65, knee: 1.1 + Math.max(0, Math.cos(qb)) * 0.8, foot: -0.4 + Math.sin(qb) * 0.35, splay: 0.06 });
+  }
+  p.hips = [0, -0.55 + Math.cos(ph) * 0.08, -0.05];
   return p;
 }
 function stalkPose(t) {
-  // Low crouch, head craned forward and tilting side to side, claws near the ground.
-  const p = basePose(), w = Math.sin((t / 2.6) * TAU);
-  p.Spine[0] = 0.75; p.Chest[0] = 0.3; p.Neck[0] = -0.6; p.Head[0] = -0.15; p.Head[2] = w * 0.4; p.Head[1] = Math.sin((t / 2.6) * TAU * 0.5) * 0.25;
+  // 4 s: folded low, head slowly tipping sideways like an owl listening, weight
+  // rocking, claw tips tapping the ground out of rhythm.
+  const T = 4, p = basePose(), tilt = Math.sin((TAU * t) / T);
+  p.Spine[0] = 0.85 + wob(t, T, 1, 0.05); p.Chest[0] = 0.3; p.Neck[0] = -0.75; p.Head[0] = -0.2;
+  p.Head[2] = tilt * 0.75 + twitch(t, 1.3, T, 0.3, 0.03, 0.2); p.Head[1] = wob(t, T, 2, 0.35);
+  p.Spine[2] = wob(t, T, 3, 0.06);
   for (const [S, s] of SIDES) {
-    setLeg(p, S, { thigh: -1.05, knee: 1.75, foot: -0.6, splay: 0.12 });
-    setArm(p, S, { lower: 1.15, fwd: 0.85 + w * 0.06 * s, elbow: 0.7, curl: 0.55 + Math.sin(t * 5 + s * 2) * 0.12 });
+    setLeg(p, S, { thigh: -1.1, knee: 1.85, foot: -0.65, splay: 0.14 });
+    const tap = twitch(t, s > 0 ? 0.6 : 2.6, T, 0.5, 0.04, 0.18) + twitch(t, s > 0 ? 3.2 : 1.7, T, 0.4, 0.04, 0.18);
+    setArm(p, S, { lower: 1.18, fwd: 0.9 + wob(t, T, 4 + s, 0.06), elbow: 0.75, curl: 0.5 - tap });
   }
-  p.hips = [0, -0.5, -0.05];
+  p.hips = [wob(t, T, 6, 0.04), -0.55 + wob(t, T, 7, 0.02), -0.05];
   return p;
 }
 function swipePose(t, side) {
-  // Wind up overhead, rake down and across, recover. 0.6 s.
-  const p = gaitPose(0, 1, 0), S = side > 0 ? 'L' : 'R';
-  const up = smooth01(t / 0.2), down = smooth01((t - 0.2) / 0.16), back = smooth01((t - 0.38) / 0.22);
-  const fwd = lerp(lerp(0.3, 2.6, up), 0.5, down), lower = lerp(lerp(1.25, 0.7, up), 1.3, down);
-  const a = { fwd: lerp(fwd, 0.3, back), lower: lerp(lower, 1.25, back), elbow: lerp(lerp(0.4, 0.9, up), 0.1, down), curl: lerp(0.3, -0.25, up) };
-  setArm(p, S, a);
-  p.Chest[1] = side * (lerp(0.35 * up, -0.45, down) * (1 - back));
-  p.Spine[0] = 0.3 + 0.35 * down * (1 - back);
-  p.hips[2] = 0.25 * down * (1 - back);
+  // 0.62 s: coil back (anticipation), rake down and across with the whole body,
+  // overshoot past the target, then settle.
+  const p = walkPose(0), S = side > 0 ? 'L' : 'R', s = side;
+  const coil = smooth01(t / 0.18), strike = smooth01((t - 0.18) / 0.12), settle = smooth01((t - 0.36) / 0.26);
+  const fwd = lerp(lerp(0.35, 2.7, coil), -0.2, strike), lower = lerp(lerp(1.3, 0.6, coil), 1.35, strike);
+  setArm(p, S, { fwd: lerp(fwd, 0.35, settle), lower: lerp(lower, 1.3, settle), elbow: lerp(lerp(0.4, 1.1, coil), 0.05, strike), curl: lerp(lerp(0.4, -0.4, coil), 0.8, strike), shrug: coil * (1 - strike) * 0.3 });
+  p.Chest[1] = s * lerp(lerp(0, 0.5, coil), -0.6, strike) * (1 - settle);
+  p.Spine[0] = lerp(lerp(0.42, 0.25, coil), 0.85, strike) * (1 - settle) + 0.42 * settle;
+  p.Neck[0] = lerp(-0.38, -0.7, strike) * (1 - settle) - 0.38 * settle;   // head lunges with the strike
+  p.hips[2] = lerp(-0.05 * coil, 0.35, strike) * (1 - settle);
   return p;
 }
 function killPose(t) {
-  // Rear up with claws raised (0-0.45), slam down and lunge (0.45-0.7), hold, recover (1.25-1.7).
+  // 1.7 s: rear up claws high (0-0.45), drive both claws down into the victim and lunge
+  // (0.45-0.7), bite and wrench the head side to side (0.7-1.25), straighten slowly.
   const p = basePose();
-  const up = smooth01(t / 0.45), slam = smooth01((t - 0.45) / 0.25), rec = smooth01((t - 1.25) / 0.45);
-  const shake = t > 0.7 && t < 1.25 ? Math.sin(t * 60) * 0.03 : 0;
-  p.Spine[0] = lerp(lerp(0.22, -0.25, up), 0.95, slam) * (1 - rec) + 0.22 * rec;
-  p.Chest[0] = lerp(lerp(0.18, -0.1, up), 0.3, slam);
-  p.Neck[0] = lerp(lerp(-0.12, -0.7, up), -0.3, slam) + shake;
-  p.Head[0] = lerp(-0.1, -0.35, up);
-  for (const [S] of SIDES) {
+  const up = smooth01(t / 0.45), slam = smooth01((t - 0.45) / 0.22), rec = smooth01((t - 1.25) / 0.45);
+  const bite = t > 0.72 && t < 1.25 ? Math.sin((t - 0.72) * 38) * 0.35 * (1 - (t - 0.72) / 0.53) : 0;
+  p.Spine[0] = lerp(lerp(0.32, -0.3, up), 1.0, slam) * (1 - rec) + 0.32 * rec;
+  p.Chest[0] = lerp(lerp(0.24, -0.2, up), 0.35, slam) * (1 - rec) + 0.24 * rec;
+  p.Neck[0] = lerp(lerp(-0.25, -0.85, up), 0.35, slam) * (1 - rec) - 0.25 * rec;
+  p.Head[0] = lerp(-0.12, -0.4, up) * (1 - slam) + 0.15 * slam * (1 - rec);
+  p.Head[1] = bite; p.Neck[1] = bite * 0.6; p.Head[2] = bite * 0.5 + up * (1 - slam) * 0.3;
+  for (const [S, s] of SIDES) {
     setArm(p, S, {
-      fwd: lerp(lerp(0.25, 2.7, up), 0.35, slam) * (1 - rec) + 0.25 * rec,
-      lower: lerp(lerp(1.3, 0.55, up), 1.2, slam), elbow: lerp(lerp(0.35, 0.6, up), 0.15, slam), curl: lerp(lerp(0.3, -0.35, up), 0.7, slam),
+      fwd: lerp(lerp(0.3, 2.8, up), 0.55, slam) * (1 - rec) + 0.3 * rec,
+      lower: lerp(lerp(1.32, 0.45, up), 1.05, slam), elbow: lerp(lerp(0.4, 0.7, up), 0.3, slam),
+      curl: lerp(lerp(0.35, -0.5, up), 1.0, slam) + (t > 0.7 && t < 1.25 ? Math.sin(t * 50 + s) * 0.12 : 0), shrug: up * (1 - slam) * 0.35,
     });
-    setLeg(p, S, { thigh: lerp(-0.22, -0.95, slam) * (1 - rec) - 0.22 * rec, knee: lerp(0.42, 1.25, slam) * (1 - rec) + 0.42 * rec, foot: lerp(-0.18, -0.45, slam) });
+    setLeg(p, S, { thigh: lerp(-0.28, -1.0, slam) * (1 - rec) - 0.28 * rec, knee: lerp(0.5, 1.35, slam) * (1 - rec) + 0.5 * rec, foot: lerp(-0.2, -0.5, slam) });
   }
-  p.hips = [0, lerp(lerp(-0.06, 0.06, up), -0.38, slam) * (1 - rec) - 0.06 * rec, lerp(0, 0.5, slam) * (1 - rec)];
+  p.hips = [0, lerp(lerp(-0.09, 0.08, up), -0.42, slam) * (1 - rec) - 0.09 * rec, lerp(-0.1 * up, 0.55, slam) * (1 - rec)];
   return p;
 }
 function shriekPose(t) {
-  // Head thrown back, chest arched, arms flung wide and shaking. 1.3 s.
-  const p = basePose(), a = smooth01(t / 0.3) * (1 - smooth01((t - 0.95) / 0.35)), sh = Math.sin(t * 55) * 0.05 * a;
-  p.Spine[0] = lerp(0.22, -0.2, a); p.Chest[0] = lerp(0.18, -0.35, a); p.Neck[0] = lerp(-0.12, -0.75, a) + sh; p.Head[0] = lerp(-0.1, -0.35, a); p.Head[2] = sh * 2;
-  for (const [S] of SIDES) setArm(p, S, { lower: lerp(1.3, 0.35, a), fwd: lerp(0.25, -0.35, a), elbow: lerp(0.35, 0.15, a), curl: lerp(0.3, -0.45, a) + sh });
+  // 1.3 s: convulse back, jaw-to-sky, arms thrown wide and spasming.
+  const p = basePose(), a = smooth01(t / 0.25) * (1 - smooth01((t - 0.95) / 0.35));
+  const sp = (k) => Math.sin(t * 47 + k) * 0.06 * a + Math.sin(t * 23 + k * 2) * 0.04 * a;
+  p.Spine[0] = lerp(0.32, -0.25, a) + sp(1); p.Chest[0] = lerp(0.24, -0.45, a) + sp(2);
+  p.Neck[0] = lerp(-0.25, -0.9, a) + sp(3); p.Head[0] = lerp(-0.12, -0.4, a); p.Head[2] = sp(4) * 3; p.Head[1] = sp(5) * 2;
+  for (const [S, s] of SIDES) setArm(p, S, { lower: lerp(1.32, 0.25, a), fwd: lerp(0.3, -0.45, a) + sp(6 + s), elbow: lerp(0.4, 0.1, a) + sp(8 + s), curl: lerp(0.35, -0.55, a) + sp(10 + s) * 3, shrug: a * 0.3 });
+  p.hips[1] = -0.09 + a * 0.04;
   return p;
 }
 function smooth01(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
@@ -1060,12 +1131,12 @@ function poseClip(name, duration, fn, restHips, fps = 30) {
 }
 function buildMonsterClips(restHips) {
   return {
-    idle: poseClip('idle', 3.2, idlePose, restHips),
-    walk: poseClip('walk', 1.1, (t) => gaitPose(t, 1.1, 0), restHips),
-    run: poseClip('run', 0.72, (t) => gaitPose(t, 0.72, 1), restHips),
-    stalk: poseClip('stalk', 2.6, stalkPose, restHips),
-    swipeL: poseClip('swipeL', 0.6, (t) => swipePose(t, 1), restHips),
-    swipeR: poseClip('swipeR', 0.6, (t) => swipePose(t, -1), restHips),
+    idle: poseClip('idle', 6, idlePose, restHips),
+    walk: poseClip('walk', 1.25, walkPose, restHips),
+    run: poseClip('run', 0.62, gallopPose, restHips),
+    stalk: poseClip('stalk', 4, stalkPose, restHips),
+    swipeL: poseClip('swipeL', 0.62, (t) => swipePose(t, 1), restHips),
+    swipeR: poseClip('swipeR', 0.62, (t) => swipePose(t, -1), restHips),
     kill: poseClip('kill', 1.7, killPose, restHips),
     shriek: poseClip('shriek', 1.3, shriekPose, restHips),
   };
@@ -1177,7 +1248,8 @@ function makeMonsterAvatar() {
     });
     rig.add(model);
     reg(g, 'entity');
-    g.userData.monster = { anim: makeMonsterAnimator(model), mats, meshes, camo: 0, stillT: 0, still: 0 };
+    const bones = {}; model.traverse((o) => { if (o.isBone) bones[o.name] = o; });
+    g.userData.monster = { anim: makeMonsterAnimator(model), mats, meshes, bones, camo: 0, stillT: 0, look: 0, spasms: [], nextSpasm: time + 1 + Math.random() * 3 };
     g.userData.rig = rig;
     scene.add(g);
     return g;
@@ -1812,7 +1884,9 @@ function onSnap(msg) {
       continue;
     }
     const r = players.get(s.id); if (!r) continue;
-    r.target.set(s.x, 0, s.z); r.targetYaw = s.ry; r.noise = s.n; r.crouch = s.c; r.repairing = s.r; r.hp = s.hp;
+    const dying = r.anim && (r.anim.dead >= 0 || r.anim.deadDelay > 0);
+    const killing = r.avatar.userData.monster?.anim.shot === 'kill';
+    if (!dying && !killing) { r.target.set(s.x, 0, s.z); r.targetYaw = s.ry; } r.noise = s.n; r.crouch = s.c; r.repairing = s.r; r.hp = s.hp;
     if (r.status !== s.s) {
       r.status = s.s;
       if (s.s === 'escaped') r.avatar.visible = false;
@@ -1841,10 +1915,18 @@ function onEvent(e) {
       const lethal = e.hp <= 0;
       addRipple(pos, lethal ? 22 : 14, lethal ? 2.2 : 1.6, 12);
       const m = players.get(e.by), M = m?.avatar.userData.monster;
+      // Choreography: monster and victim turn to face each other; the victim is drawn in
+      // to claw's reach, so the slam lands on them and they fall away from the monster.
+      const attacker = e.by === me.id ? me.pos : m?.pos;
       if (lethal && m) {
-        // Monster kill animation, turned toward its victim.
         if (M) M.anim.play('kill');
-        m.targetYaw = Math.atan2(-(e.x - m.pos.x), -(e.z - m.pos.z));
+        m.targetYaw = m.yaw = Math.atan2(-(e.x - m.pos.x), -(e.z - m.pos.z));
+      }
+      const victim = players.get(e.id);
+      if (lethal && victim && attacker) {
+        const dx = victim.pos.x - attacker.x, dz = victim.pos.z - attacker.z, d = Math.hypot(dx, dz) || 1;
+        if (d > 1.3) { victim.pos.set(attacker.x + (dx / d) * 1.3, 0, attacker.z + (dz / d) * 1.3); victim.target.copy(victim.pos); }
+        victim.targetYaw = victim.yaw = Math.atan2(dx, dz); // forward (-Z) points back at the attacker
       }
       if (e.id === me.id) {
         me.damage = 1; me.boost = 2.5; sfx.hit();
@@ -1860,6 +1942,7 @@ function onEvent(e) {
       break;
     }
     case 'sonar': {
+      revealSurvivors(e.x, e.z);
       const sm = players.get(e.by)?.avatar.userData.monster;
       if (sm && sm.anim.shot !== 'kill') sm.anim.play('shriek');
       if (e.by !== me.id) { addRipple(pos.setY(1.5), 30, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); }
@@ -2002,6 +2085,7 @@ function monsterSonar() {
   if (!me.isMonster || me.status !== 'alive' || me.sonarCD > 0) return;
   me.sonarCD = CFG.SONAR_CD;
   addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), 30, 1.3, 14);
+  revealSurvivors(me.pos.x, me.pos.z);
   monsterPost.pass.uniforms.uPulse.value = 1;
   sfx.ping();
   sendToHost({ t: 'sonar' });
@@ -2150,11 +2234,21 @@ function boneRot(b, axis, ang) { if (b && ang) b.quaternion.multiply(_q.setFromA
 const ease = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
 const KILL = { raise: 0.45, slam: 0.7, recover: 1.25, end: 1.7 }; // monster kill timeline (s)
 
+// The sonar shriek is the counter to hiding: survivors in range flash up for a moment
+// as the wave (14 m/s) passes them.
+function revealSurvivors(x, z) {
+  for (const r of players.values()) {
+    if (r.isMonster || r.status !== 'alive') continue;
+    const d = Math.hypot(r.pos.x - x, r.pos.z - z);
+    if (d < 30) r.anim.revealAt = time + d / 14;
+  }
+}
 function animateSurvivor(r, dt) {
   const a = r.avatar, A = r.anim, rig = a.userData.rig, B = a.userData.bones;
   // In monster vision a survivor stands out only while making noise; standing still they
   // fade back into the environment grid over ~1.5 s.
-  const loud = r.noise > 0.05 || r.repairing || A.flinch > 0.1 || A.dead >= 0;
+  const revealed = A.revealAt !== undefined && time > A.revealAt && time < A.revealAt + 1.2;
+  const loud = r.noise > 0.05 || r.repairing || A.flinch > 0.1 || A.dead >= 0 || revealed;
   A.self = loud ? Math.min(1, (A.self ?? 0) + dt * 6) : Math.max(0, (A.self ?? 0) - dt * 0.7);
   if (a.userData.sonar) a.userData.sonar.uniforms.uSelf.value = A.self;
   A.flinch = Math.max(0, A.flinch - dt * 2.5);
@@ -2200,6 +2294,42 @@ function animateSurvivor(r, dt) {
   }
 }
 
+// Organic layer on top of the clips: the head turns to track you when you're close,
+// random spasms jerk the head, neck and claws, and the fingers never stop trembling.
+const _lv = new THREE.Vector3(), _lq = new THREE.Quaternion(), _lAx = new THREE.Vector3();
+function boneSpin(b, x, y, z, ang) { if (!b || !ang) return; b.quaternion.multiply(_lq.setFromAxisAngle(_lAx.set(x, y, z), ang)); }
+function liveLayer(g, M, dt) {
+  const B = M.bones;
+  // Head tracking (only when a survivor is looking at it from nearby)
+  const watching = viewMode === 'survivor' && M.anim.shot !== 'kill';
+  g.worldToLocal(_lv.copy(camera.position));
+  const dist = Math.hypot(_lv.x, _lv.z);
+  M.look = damp(M.look, watching && dist < 14 ? 1 : 0, 3, dt);
+  if (M.look > 0.01) {
+    const yaw = clamp(Math.atan2(-_lv.x, -_lv.z), -1.3, 1.3) * M.look;   // model +Z is the avatar's -Z
+    const pitch = clamp(-Math.atan2(_lv.y - 1.9, dist), -0.6, 0.6) * M.look;
+    if (B.Neck) B.Neck.quaternion.premultiply(_lq.setFromAxisAngle(_lAx.set(0, 1, 0), yaw * 0.45));
+    if (B.Head) { B.Head.quaternion.premultiply(_lq.setFromAxisAngle(_lAx.set(0, 1, 0), yaw * 0.55)); boneSpin(B.Head, 1, 0, 0, pitch); }
+  }
+  // Spasms: every few seconds one body part jerks sharply then eases back.
+  if (time > M.nextSpasm) {
+    M.nextSpasm = time + 1.5 + Math.random() * 4;
+    const parts = ['Head', 'Head', 'Neck', 'ClawsL', 'ClawsR', 'HandL', 'HandR', 'Chest'];
+    const name = parts[Math.floor(Math.random() * parts.length)], big = /Claws|Hand/.test(name);
+    const ax = [Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5]; const n = Math.hypot(...ax) || 1;
+    M.spasms.push({ bone: B[name], ax: ax.map((v) => v / n), amp: (big ? 0.7 : 0.45) * (Math.random() < 0.5 ? -1 : 1), t: 0, dur: 0.25 + Math.random() * 0.5 });
+  }
+  M.spasms = M.spasms.filter((sp) => {
+    sp.t += dt;
+    const env = sp.t < 0.05 ? sp.t / 0.05 : Math.pow(Math.max(0, 1 - (sp.t - 0.05) / sp.dur), 2);
+    boneSpin(sp.bone, sp.ax[0], sp.ax[1], sp.ax[2], sp.amp * env);
+    return sp.t < sp.dur + 0.05;
+  });
+  // Constant tremor in the claws
+  boneSpin(B.ClawsL, 0, 1, 0, Math.sin(time * 31) * 0.05 + Math.sin(time * 17.3) * 0.04);
+  boneSpin(B.ClawsR, 0, 1, 0, Math.sin(time * 29 + 1) * 0.05 + Math.sin(time * 19.1) * 0.04);
+}
+
 function animateMonster(r, dt) {
   const a = r.avatar, rig = a.userData.rig, M = a.userData.monster;
   if (!M) { // primitive fallback: simple lurch
@@ -2212,8 +2342,9 @@ function animateMonster(r, dt) {
   M.stillT = r.speed < 0.3 && !M.anim.busy() ? M.stillT + dt : 0;
   const still = M.stillT > 0.6 ? 1 : 0;
   M.anim.update(dt, r.speed, still);
+  liveLayer(a, M, dt);
   M.camo = still ? Math.min(1, M.camo + dt / 1.2) : Math.max(0, M.camo - dt / 0.25);
-  const op = 1 - 0.985 * M.camo;
+  const op = 1 - M.camo; // fully invisible once camouflaged
   for (const m of M.mats) m.opacity = op;
   for (const o of M.meshes) o.castShadow = M.camo < 0.3;
 }
@@ -2409,8 +2540,11 @@ addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   for (const p of [monsterPost, survivorPost]) p.comp.setSize(window.innerWidth, window.innerHeight);
   monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
+  monsterPost.echoPass.uniforms.uRes.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
 });
 monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
+monsterPost.echoPass.uniforms.uRes.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+monsterPost.echoPass.uniforms.uFar.value = camera.far; monsterPost.echoPass.uniforms.uNear.value = camera.near;
 
 // ----------------------------------------------------------------------------
 //  MAIN LOOP

@@ -32,8 +32,9 @@ A fenced, 120 m square of night forest:
 - **Exit:** the gate is in the south fence. Once all three generators run, it slides open and the road beyond it is the way out.
 
 **Camouflage:**
-- **Monster:** standing still makes it drop into a listening crouch and fade almost completely for survivors. Only a few dithered specks remain, and it casts no shadow. The monster's HUD shows when it is hidden.
-- **Survivors:** in monster vision they only stand out while making noise. Still survivors fade back into the environment grid within about 1.5 s, so they look like any other tree or wall when a ripple passes over them.
+- **Monster:** standing still makes it drop into a listening crouch and fade out completely for survivors, shadow included. The monster's HUD shows when it is hidden.
+- **Survivors:** in monster vision a survivor is drawn only while making noise. Stay silent and within about 1.5 s you vanish completely: ripples pass straight through you.
+- **The counter:** the monster's sonar shriek. Every survivor within 30 m flashes up as a white outline for about a second as the wave (14 m/s) reaches them.
 
 **Kills:** the monster rears up and slams its claws down, and the survivor falls backward. A survivor who is taken sees it in first person: they're turned to face the monster, then collapse to the floor. The match result waits until the final kill has played out.
 
@@ -56,10 +57,14 @@ Caught or escaped survivors become free-flying spectators and can press **V** to
 
 ### Monster vision (`game.js` → *MONSTER VISION*)
 - Every mesh keeps two materials, its normal `MeshStandardMaterial` and a sonar `ShaderMaterial`. `setViewMode()` swaps them for the whole scene.
-- The sonar shader draws a world-space grid (via `fwidth` anti-aliasing) and sums up to 48 **ripples**. Each ripple is an expanding spherical shell, `(origin, startTime, maxRadius, strength, speed)`, kept in a ring buffer of shared uniforms.
-- The environment's base brightness is tiny (`0.05`), so static geometry is barely visible. Players have a base brightness of zero: they only appear when a ripple passes over them.
+- The sonar shader outputs flat, unlit brightness: just how much sound touches each surface. It sums up to 48 **ripples**. Each ripple is an expanding spherical shell, `(origin, startTime, maxRadius, strength, speed)`, kept in a ring buffer of shared uniforms.
+- An **echo pass** turns that into a flat, drawn image:
+  - It inks contours from the second derivative of scene depth, so only silhouettes and creases are drawn, as on a black page.
+  - The ink glows where sound lands, and a halftone dot fill shows how bright each area is.
+  - The environment is barely visible until a ripple sweeps over it.
+- Survivors use their own material, which dissolves to nothing (a dithered discard) while they're silent.
 - The monster's client creates ripples from each survivor's synced **noise** level. Crouching gives small, rare ripples (~4 m), walking gives medium ones, and sprinting gives large, frequent ones (~13 m). Repairs, hits, generators and the gate opening send out big pulses.
-- Post-processing for the monster view uses UnrealBloom plus a custom CRT pass (scanlines, barrel distortion, chromatic split and vignette). Survivors get a grain/vignette pass with a damage effect and a fear effect when the monster is near.
+- After the echo pass, the monster view gets UnrealBloom and a custom CRT pass (scanlines, barrel distortion, chromatic split and vignette). Survivors get a grain/vignette pass with a damage effect and a fear effect when the monster is near.
 
 ### Signaling server
 By default, PeerJS uses its free public cloud server. To use your own [PeerServer](https://github.com/peers/peerjs-server), add query parameters:
@@ -84,9 +89,16 @@ Notes:
   - It measures joint positions by slicing the T-posed mesh: the legs separate below the crotch, the arms are thinnest at the elbow and wrist, and the claws fan out past the hand.
   - It builds a 23-bone humanoid skeleton: hips, spine, chest, neck, head, and clavicles, upper arms, forearms, hands, claws, thighs, shins, feet and toes on each side.
   - It skins every vertex to up to four bones, with smooth blends across each joint.
-- **Monster animation:** `game.js` builds the clips at runtime from pose functions: idle, walk, run, stalk (the still/listening crouch), left and right claw swipes, kill and shriek.
-  - Locomotion blends by speed and stillness.
-  - Swipes, the kill and the shriek play on top, triggered by attack, kill and sonar events, so everyone sees the same animation.
+- **Monster animation:** `game.js` builds the clips at runtime from pose functions.
+  - **Locomotion:**
+    - **Idle:** ragged breathing, a stalling and snapping head scan, fingers flexing.
+    - **Walk:** a limping, lurching stride, arms swinging late and loose, head held eerily level.
+    - **Run:** an all-fours gallop.
+    - **Stalk:** a folded, owl-like listening crouch with claws tapping.
+    - Motion is layered from uneven harmonics of each loop, so it reads as organic while still looping seamlessly.
+  - **One-shots:** claw swipes (coil, strike, overshoot), the kill (rear up, slam, bite and wrench the head) and the shriek (convulsions). They play on top of locomotion, triggered by attack, kill and sonar events, so everyone sees the same thing.
+  - **Live layer:** on top of the clips, its head turns to track a nearby survivor, random spasms jerk the head, neck and claws, and the claws never stop trembling.
+  - **Kill choreography:** the monster and victim turn to face each other, and the victim is drawn into reach. The slam lands on them and they fall away from the monster.
 - **Survivor animation:** the walk/idle clips are blended by speed. Crouch, sprint lean, repairing, hit flinch and the death fall are layered on top as procedural bone rotations.
 
 ## Playtest build (Claude artifact)
