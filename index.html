@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blindsight</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- PeerJS (global `Peer`) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- Three.js as ES modules -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- ===================== LOBBY / MENU ===================== -->
+  <div id="menu" class="screen">
+    <div class="panel">
+      <h1 class="title">BLINDSIGHT</h1>
+      <p class="tagline">It cannot see you. It can hear you.</p>
+
+      <div id="menu-main">
+        <label for="name-input">Your name <input id="name-input" maxlength="16" placeholder="Survivor" /></label>
+
+        <div class="group">
+          <div class="group-label">Play vs bot</div>
+          <div class="row">
+            <button id="btn-bot-survivor" class="primary" disabled>Play as survivor</button>
+            <button id="btn-bot-monster" class="primary" disabled>Play as monster</button>
+          </div>
+          <p class="muted">As survivor you face a bot monster that hunts by sound. As monster you hunt two bot survivors.</p>
+        </div>
+
+        <div class="group" id="online-group">
+          <div class="group-label">Online (peer-to-peer)</div>
+          <div class="row">
+            <button id="btn-host" disabled>Host room</button>
+            <button id="btn-offline" disabled>Custom offline lobby</button>
+          </div>
+          <div class="row">
+            <input id="code-input" maxlength="6" placeholder="ROOM ID" />
+            <button id="btn-join" disabled>Join</button>
+          </div>
+        </div>
+        <p id="embed-note" class="muted hidden">Online rooms need WebRTC, which this embedded page can't use. Open the game's index.html from a web server to host or join a room.</p>
+        <p id="menu-status" class="status">Loading models…</p>
+      </div>
+
+      <div id="menu-lobby" class="hidden">
+        <div class="room-code">Room ID <span id="room-code">-----</span> <button id="btn-copy" class="small">Copy</button></div>
+        <ul id="player-list"></ul>
+        <div id="host-controls" class="hidden">
+          <div class="row">
+            <button id="btn-random-monster" class="small">Random monster</button>
+            <button id="btn-add-bot" class="small">Add bot survivor</button>
+            <button id="btn-add-bot-monster" class="small">Add bot monster</button>
+            <button id="btn-clear-bots" class="small">Remove bots</button>
+          </div>
+          <button id="btn-start" class="primary wide">Start game</button>
+          <button id="btn-lobby-menu" class="wide hidden">Main menu</button>
+        </div>
+        <p id="lobby-status" class="status">Waiting for host to start…</p>
+      </div>
+
+      <details class="howto">
+        <summary>How to play</summary>
+        <div class="cols">
+          <div>
+            <h3>Survivors</h3>
+            <p>Repair all <b>3 generators</b> (hold <kbd>E</kbd>) to open the exit gate, then escape. Or stay alive until the timer runs out.</p>
+            <p>Every step makes noise. <kbd>C</kbd> crouch is nearly silent, <kbd>Shift</kbd> sprinting is loud. Repairing hums.</p>
+            <p><kbd>F</kbd> flashlight. Two hits and you're taken.</p>
+          </div>
+          <div>
+            <h3>The Monster</h3>
+            <p>You are blind. The world is a dim green grid. Sound lights it up: footsteps send out ripples across the lines.</p>
+            <p>Stand still and you fade into the background for survivors. <kbd>LMB</kbd> or <kbd>Space</kbd> attack · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> charge.</p>
+          </div>
+        </div>
+        <p class="muted"><kbd>WASD</kbd> or arrow keys move. Look with the mouse (click to lock the cursor), or drag on the screen to look with a mouse or touch. <kbd>V</kbd> toggles monster vision while spectating.</p>
+      </details>
+      <p class="credits">Models (CC BY 4.0): <a href="https://sketchfab.com/3d-models/survivor-toon-style-5aa13349079141d0927b8ea96e1349c4" target="_blank" rel="noopener">Survivor [Toon-Style]</a> by lalit · <a href="https://sketchfab.com/3d-models/wendigo-inspired-by-until-dawn-d46093a707a24444af1ed7d10aa7198f" target="_blank" rel="noopener">Wendigo</a> by marc3_C. The wendigo was simplified for the web.</p>
+    </div>
+  </div>
+
+  <!-- ===================== IN-GAME HUD ===================== -->
+  <div id="hud" class="hidden">
+    <div id="hud-top">
+      <span id="hud-role"></span>
+      <span id="hud-timer">5:00</span>
+      <span id="hud-objective"></span>
+    </div>
+    <div id="crosshair"></div>
+    <div id="prompt"></div>
+    <div id="feed"></div>
+
+    <div id="hud-survivor" class="hud-box hidden">
+      <div class="stat"><span>Health</span><span id="hp-pips"></span></div>
+      <div class="stat"><span>Stamina</span><div class="bar"><div id="stamina-fill"></div></div></div>
+      <div class="stat"><span>Noise</span><div class="bar noise"><div id="noise-fill"></div></div></div>
+    </div>
+
+    <div id="hud-monster" class="hud-box hidden">
+      <div class="stat"><span>Sonar</span><div class="bar sonar"><div id="sonar-fill"></div></div></div>
+      <div class="stat"><span>Strike</span><div class="bar sonar"><div id="attack-fill"></div></div></div>
+      <div class="stat"><span>Charge</span><div class="bar sonar"><div id="mstamina-fill"></div></div></div>
+      <div class="stat"><span id="camo-label">Camouflage</span><div class="bar camo"><div id="camo-fill"></div></div></div>
+      <div class="stat"><span>Prey left</span><span id="prey-count">0</span></div>
+    </div>
+  </div>
+
+  <div id="resume" class="hidden"><div>Click to resume</div></div>
+
+  <div id="endscreen" class="screen hidden">
+    <div class="panel">
+      <h1 id="end-title" class="title">—</h1>
+      <p id="end-reason"></p>
+      <ul id="end-stats"></ul>
+      <div class="row end-actions">
+        <button id="btn-rematch" class="primary hidden">Rematch</button>
+        <button id="btn-lobby" class="primary hidden">Back to lobby</button>
+        <button id="btn-menu" class="hidden">Main menu</button>
+      </div>
+      <p id="end-wait" class="status">Waiting for host…</p>
+    </div>
+  </div>
+
+  <div id="fatal" class="screen hidden">
+    <div class="panel"><h2 id="fatal-msg">Disconnected</h2><button onclick="location.reload()" class="primary">Reload</button></div>
+  </div>
+
+  <script type="module" src="game.js"></script>
+</body>
+</html>
