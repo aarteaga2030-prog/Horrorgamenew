@@ -18,7 +18,7 @@ python3 -m http.server 8000
 | | Survivors | Monster |
 |---|---|---|
 | Goal | Repair all 3 generators (hold **E**) to open the exit gate, then escape. Or stay alive until the 5:00 timer runs out. | Catch every survivor (2 hits each). |
-| Sees | A moonlit forest, plus a flashlight (**F**). | A dark green wireframe grid. The world is almost invisible until sound lights it up. |
+| Sees | A moonlit forest, plus a flashlight (**F**). | A flat, top-down sonar screen. The world appears only where sound sweeps across it. |
 | Movement | **WASD** / arrows. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** / arrows. **Shift** charge. |
 | Abilities | Repairing hums, which also makes noise. | **LMB** or **Space** strike. **Q** / **RMB** sonar shriek (reveals everything nearby; survivors hear it). |
 
