@@ -55,16 +55,13 @@ Caught or escaped survivors become free-flying spectators and can press **V** to
 - Each client sends `state` (position, yaw, noise level, crouch, repairing) at 20 Hz. The host merges these into a `snap` and broadcasts it at 20 Hz. Remote players are smoothed with exponential interpolation.
 - The host decides all game outcomes: hits and HP, generator progress, gate state, escapes, the timer and the win conditions. Clients send intents (`attack`, `repair`, `sonar`, `escape`), and the host replies with `event` messages.
 
-### Monster vision (`game.js` → *MONSTER VISION*)
-- Every mesh keeps two materials, its normal `MeshStandardMaterial` and a sonar `ShaderMaterial`. `setViewMode()` swaps them for the whole scene.
-- The sonar shader outputs flat, unlit brightness: just how much sound touches each surface. It sums up to 48 **ripples**. Each ripple is an expanding spherical shell, `(origin, startTime, maxRadius, strength, speed)`, kept in a ring buffer of shared uniforms.
-- An **echo pass** turns that into a flat, drawn image:
-  - It inks contours from the second derivative of scene depth, so only silhouettes and creases are drawn, as on a black page.
-  - The ink glows where sound lands, and a halftone dot fill shows how bright each area is.
-  - The environment is barely visible until a ripple sweeps over it.
-- Survivors use their own material, which dissolves to nothing (a dithered discard) while they're silent.
-- The monster's client creates ripples from each survivor's synced **noise** level. Crouching gives small, rare ripples (~4 m), walking gives medium ones, and sprinting gives large, frequent ones (~13 m). Repairs, hits, generators and the gate opening send out big pulses.
-- After the echo pass, the monster view gets UnrealBloom and a custom CRT pass (scanlines, barrel distortion, chromatic split and vignette). Survivors get a grain/vignette pass with a damage effect and a fear effect when the monster is near.
+### Monster vision: a 2D sonar screen (`game.js` → *SOUND RIPPLES + THE MONSTER'S SONAR SCREEN*)
+The monster doesn't get a 3D view. It reads a flat, heading-up sonar plate drawn on a 2D canvas over the game, and the 3D scene isn't rendered at all while you play it.
+- **The plate:** the wendigo is the arrow at the centre, pointing the way it faces. Range rings mark every 10 m, bearing lines every 30°, with an N marker. Scroll to zoom from 14 to 40 m.
+- **Ripples:** sound is up to 48 expanding rings, `(origin, startTime, maxRadius, strength, speed)`. Each ring is drawn, with a bright blip where it started.
+- **Obstacles:** trees (trunk dot plus canopy ring), rocks, logs, cabin walls, furniture, the fence and bushes (dashed) appear only where a ring sweeps over them. Each lit shape keeps a ~1 s afterglow, and the monster always senses what's within ~4.5 m. Generators and the gate are always faintly marked.
+- **Survivors:** they aren't drawn at all. Their noise shows only as rings and blips (crouching gives small, rare ones, sprinting large, frequent ones). A shriek flashes everyone within 30 m as a white marker.
+- **Screen treatment:** scanlines, a vignette, a flash on shrieks, and shake on kills. Spectators who press V get the same screen, plus a red marker for the monster.
 
 ### Signaling server
 By default, PeerJS uses its free public cloud server. To use your own [PeerServer](https://github.com/peers/peerjs-server), add query parameters:

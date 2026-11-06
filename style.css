@@ -13,6 +13,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
   font-family: "Courier New", ui-monospace, monospace; }
+canvas#radar { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 1; pointer-events: none; }
 canvas#game { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .hidden { display: none !important; }
 
