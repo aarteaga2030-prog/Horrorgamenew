@@ -277,29 +277,38 @@ const SONAR_VERT = /* glsl */ `
     vNormalW = normalize(mat3(modelMatrix) * objectNormal);
     gl_Position = projectionMatrix * viewMatrix * wp;
   }`;
-// Flat, unlit output: each surface is just "how much sound is touching it". The echo
-// post pass (below) turns this into outlines and halftone, so the monster sees a flat,
-// drawn image rather than lit 3D surfaces.
+// The monster "sees" by a grid of light cast from its own eyes: the lines are laid out
+// by viewing angle (yaw/pitch from the camera), not on each surface, so they run
+// unbroken across trees, ground and bodies alike, with no perspective foreshortening.
+// Brightness has no distance falloff and no shading, so depth is hard to judge; only
+// sound (expanding ripples) makes surfaces stand out from one another.
 const SONAR_FRAG = /* glsl */ `
   uniform float uTime;
   uniform vec3 uCamPos;
   uniform vec4 uRip[MAXR];
   uniform vec3 uRipP[MAXR];
-  uniform float uBase;      // ambient visibility of this surface (env is barely visible)
+  uniform float uBase;      // ambient visibility (barely visible)
   uniform float uGain;      // how strongly ripples light this surface
-  uniform float uGrid;      // (unused in the echo view; kept for material compatibility)
+  uniform float uGrid;      // grid spacing in degrees of view angle
   uniform float uNearGain;  // faint "touch" sense right around the monster
   uniform vec3 uColor;
-  uniform float uSelf;      // survivors: 1 while making noise, 0 = not drawn at all
   varying vec3 vWorld;
   varying vec3 vNormalW;
 
+  // Anti-aliased grid line for an angular coordinate, safe across the atan wrap.
+  float angLine(float a, float a2) {
+    float w = min(fwidth(a), fwidth(a2));
+    float g = abs(fract(a - 0.5) - 0.5) / max(w, 1e-4);
+    return 1.0 - min(g, 1.0);
+  }
+
   void main() {
-    // Silent survivors dissolve out completely (dithered so the fade isn't a pop).
-    if (uSelf < 0.999) {
-      float h = fract(sin(dot(floor(gl_FragCoord.xy), vec2(12.9898, 78.233))) * 43758.5453);
-      if (h >= uSelf) discard;
-    }
+    vec3 dir = normalize(vWorld - uCamPos);
+    float yaw = degrees(atan(dir.x, dir.z)) / uGrid;            // -180..180 degrees
+    float yaw2 = degrees(atan(-dir.x, -dir.z)) / uGrid;         // same lines, seam on the other side
+    float pitch = degrees(asin(clamp(dir.y, -1.0, 1.0))) / uGrid;
+    float lines = max(angLine(yaw, yaw2), angLine(pitch, pitch));
+
     float energy = 0.0;
     for (int i = 0; i < MAXR; i++) {
       vec4 r = uRip[i];
@@ -311,33 +320,36 @@ const SONAR_FRAG = /* glsl */ `
       float d = distance(vWorld, r.xyz);
       float w = 0.3 + rad * 0.06;
       float ring = exp(-pow((d - rad) / w, 2.0));
-      float fill = (1.0 - smoothstep(0.0, rad + 0.001, d)) * 0.04;
+      float fill = (1.0 - smoothstep(0.0, rad + 0.001, d)) * 0.06;
       float fade = 1.0 - rad / p.x;
       fade *= fade;
       energy += (ring + fill) * fade * p.y;
     }
-    float dc = distance(vWorld, uCamPos);
-    float base = uBase * (1.0 - smoothstep(8.0, 45.0, dc));
-    float near = (1.0 - smoothstep(0.0, 5.0, dc)) * uNearGain;
-    gl_FragColor = vec4(uColor * (base + energy * uGain + near), 1.0);
+    float near = (1.0 - smoothstep(0.0, 5.0, distance(vWorld, uCamPos))) * uNearGain;
+    float I = uBase + energy * uGain + near;
+    gl_FragColor = vec4(uColor * (lines * I * 1.8 + I * 0.04), 1.0);
   }`;
 function makeSonarMaterial({ base, gain, grid, near, color }) {
   return new THREE.ShaderMaterial({
     defines: { MAXR: CFG.MAX_RIPPLES },
     uniforms: Object.assign({}, sonarShared, {
       uBase: { value: base }, uGain: { value: gain }, uGrid: { value: grid },
-      uNearGain: { value: near }, uColor: { value: new THREE.Color(color) }, uSelf: { value: 1 },
+      uNearGain: { value: near }, uColor: { value: new THREE.Color(color) },
     }),
     vertexShader: SONAR_VERT,
     fragmentShader: SONAR_FRAG,
   });
 }
-const ENTITY_SONAR = { base: 0.25, gain: 2.6, grid: 0.2, near: 0.35, color: 0xd8fff0 };
 const SONAR_MATS = {
-  env: makeSonarMaterial({ base: 0.06, gain: 1.0, grid: 1.0, near: 0.25, color: 0x2bff7a }),
-  gen: makeSonarMaterial({ base: 0.35, gain: 1.0, grid: 0.25, near: 0.3, color: 0xb4ff3b }),   // objectives faintly visible
-  entity: makeSonarMaterial({ base: 0.0, gain: 2.6, grid: 0.2, near: 0.35, color: 0x9bffc4 }), // players: ONLY visible via noise
+  env: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0.2, color: 0x2bff7a }),
+  gen: makeSonarMaterial({ base: 0.2, gain: 1.0, grid: 1.6, near: 0.2, color: 0xb4ff3b }),   // objectives faintly visible
 };
+SONAR_MATS.entity = SONAR_MATS.env; // players get no special treatment: same light, same lines
+// A shell around the world, seen only in monster vision, carries the same grid past the
+// treetops so nothing stands out as a silhouette against an empty sky.
+const monsterSky = new THREE.Mesh(new THREE.SphereGeometry(190, 32, 16), makeSonarMaterial({ base: 0.035, gain: 0, grid: 1.6, near: 0, color: 0x2bff7a }));
+monsterSky.material.side = THREE.BackSide;
+monsterSky.frustumCulled = false;
 
 // Ripple ring buffer
 let rippleIdx = 0;
@@ -369,6 +381,7 @@ function setViewMode(mode) {
   const mon = mode === 'monster';
   for (const e of swappables) e.mesh.material = mon ? e.m : e.s;
   for (const o of survivorOnly) o.visible = !mon;
+  monsterSky.visible = mon;
   scene.fog = mon ? null : survivorFog;
   scene.background = new THREE.Color(mon ? 0x000000 : 0x101722);
   flashlight.visible = !mon && flashlightOn;
@@ -423,55 +436,17 @@ const SurvivorPostShader = {
       gl_FragColor = vec4(col, 1.0);
     }`,
 };
-const EchoShader = {
-  uniforms: { tDiffuse: { value: null }, tDepth: { value: null }, uRes: { value: new THREE.Vector2(1, 1) }, uNear: { value: 0.05 }, uFar: { value: 400 } },
-  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-  fragmentShader: /* glsl */ `
-    #include <packing>
-    uniform sampler2D tDiffuse; uniform sampler2D tDepth; uniform vec2 uRes; uniform float uNear; uniform float uFar;
-    varying vec2 vUv;
-    float lin(vec2 uv) { return -perspectiveDepthToViewZ(texture2D(tDepth, uv).x, uNear, uFar); }
-    float lum(vec2 uv) { vec3 c = texture2D(tDiffuse, uv).rgb; return max(c.r, max(c.g, c.b)); }
-    void main() {
-      vec2 px = 1.0 / uRes;
-      // Ink: second derivative of linear depth catches silhouettes and creases.
-      float d = lin(vUv);
-      float dl = lin(vUv - vec2(px.x, 0.0)), dr = lin(vUv + vec2(px.x, 0.0));
-      float du = lin(vUv + vec2(0.0, px.y)), dd = lin(vUv - vec2(0.0, px.y));
-      float edge = smoothstep(0.015, 0.06, (abs(dl + dr - 2.0 * d) + abs(du + dd - 2.0 * d)) / max(d, 0.5));
-      edge = max(edge, smoothstep(0.08, 0.3, abs(dl - dr) / max(d, 0.5) + abs(du - dd) / max(d, 0.5)));
-      // Sound light around this pixel (so outlines glow where a ripple touches them)
-      vec3 c = texture2D(tDiffuse, vUv).rgb;
-      float L = max(c.r, max(c.g, c.b));
-      float Ln = max(L, max(max(lum(vUv + vec2(px.x * 2.0, 0.0)), lum(vUv - vec2(px.x * 2.0, 0.0))), max(lum(vUv + vec2(0.0, px.y * 2.0)), lum(vUv - vec2(0.0, px.y * 2.0)))));
-      // Halftone fill: dot size follows brightness, like a printed sonar plate.
-      vec2 cell = mod(floor(gl_FragCoord.xy), 5.0) - 2.0;
-      float dotOn = step(length(cell) / 2.6, sqrt(clamp(L * 1.6, 0.0, 1.0)));
-      float far = 1.0 - smoothstep(25.0, 70.0, d);
-      float ink = edge * (0.07 * far + Ln * 2.0);
-      vec3 hue = L > 1e-4 ? c / L : vec3(0.17, 1.0, 0.48);
-      vec3 col = hue * (ink + dotOn * min(L * 1.4, 1.0) * 0.32);
-      gl_FragColor = vec4(col, 1.0);
-    }`,
-};
-// ShaderPass that also hands the scene depth (from the render target) to the shader.
-class DepthShaderPass extends ShaderPass {
-  render(r, writeBuffer, readBuffer, dt, mask) { this.uniforms.tDepth.value = readBuffer.depthTexture; super.render(r, writeBuffer, readBuffer, dt, mask); }
-}
-function buildComposer(passShader, bloom, echo = false) {
+function buildComposer(passShader, bloom) {
   const comp = new EffectComposer(renderer);
-  if (echo) { comp.renderTarget1.depthTexture = new THREE.DepthTexture(); comp.renderTarget2.depthTexture = new THREE.DepthTexture(); }
   comp.addPass(new RenderPass(scene, camera));
-  let echoPass = null;
-  if (echo) { echoPass = new DepthShaderPass(EchoShader); comp.addPass(echoPass); }
   let bloomPass = null;
   if (bloom) { bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.85, 0.5, 0.03); comp.addPass(bloomPass); }
   const pass = new ShaderPass(passShader);
   comp.addPass(pass);
   comp.addPass(new OutputPass());
-  return { comp, pass, bloomPass, echoPass };
+  return { comp, pass, bloomPass };
 }
-const monsterPost = buildComposer(SonarPostShader, true, true);
+const monsterPost = buildComposer(SonarPostShader, true);
 const survivorPost = buildComposer(SurvivorPostShader, false);
 
 // ----------------------------------------------------------------------------
@@ -1211,10 +1186,6 @@ function makeSurvivorAvatar(name, colorIdx) {
       lFoot: find(/LeftFoot_/), rFoot: find(/RightFoot_/),
     };
     reg(g, 'entity');
-    // Own sonar material: uSelf fades between "lit by its own noise" and "just more background".
-    const sonar = makeSonarMaterial(ENTITY_SONAR);
-    for (const e of swappables) if (e.mesh.parent && g.getObjectById(e.mesh.id)) { e.m = sonar; if (viewMode === 'monster') e.mesh.material = sonar; }
-    g.userData.sonar = sonar;
     const label = makeLabel(name); label.position.y = 2.05; g.add(label);
     g.userData.rig = rig;
     scene.add(g);
@@ -1942,7 +1913,6 @@ function onEvent(e) {
       break;
     }
     case 'sonar': {
-      revealSurvivors(e.x, e.z);
       const sm = players.get(e.by)?.avatar.userData.monster;
       if (sm && sm.anim.shot !== 'kill') sm.anim.play('shriek');
       if (e.by !== me.id) { addRipple(pos.setY(1.5), 30, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); }
@@ -2085,7 +2055,6 @@ function monsterSonar() {
   if (!me.isMonster || me.status !== 'alive' || me.sonarCD > 0) return;
   me.sonarCD = CFG.SONAR_CD;
   addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), 30, 1.3, 14);
-  revealSurvivors(me.pos.x, me.pos.z);
   monsterPost.pass.uniforms.uPulse.value = 1;
   sfx.ping();
   sendToHost({ t: 'sonar' });
@@ -2234,23 +2203,8 @@ function boneRot(b, axis, ang) { if (b && ang) b.quaternion.multiply(_q.setFromA
 const ease = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
 const KILL = { raise: 0.45, slam: 0.7, recover: 1.25, end: 1.7 }; // monster kill timeline (s)
 
-// The sonar shriek is the counter to hiding: survivors in range flash up for a moment
-// as the wave (14 m/s) passes them.
-function revealSurvivors(x, z) {
-  for (const r of players.values()) {
-    if (r.isMonster || r.status !== 'alive') continue;
-    const d = Math.hypot(r.pos.x - x, r.pos.z - z);
-    if (d < 30) r.anim.revealAt = time + d / 14;
-  }
-}
 function animateSurvivor(r, dt) {
   const a = r.avatar, A = r.anim, rig = a.userData.rig, B = a.userData.bones;
-  // In monster vision a survivor stands out only while making noise; standing still they
-  // fade back into the environment grid over ~1.5 s.
-  const revealed = A.revealAt !== undefined && time > A.revealAt && time < A.revealAt + 1.2;
-  const loud = r.noise > 0.05 || r.repairing || A.flinch > 0.1 || A.dead >= 0 || revealed;
-  A.self = loud ? Math.min(1, (A.self ?? 0) + dt * 6) : Math.max(0, (A.self ?? 0) - dt * 0.7);
-  if (a.userData.sonar) a.userData.sonar.uniforms.uSelf.value = A.self;
   A.flinch = Math.max(0, A.flinch - dt * 2.5);
   if (A.deadDelay > 0) { A.deadDelay -= dt; if (A.deadDelay <= 0) A.dead = 0; }
   const dead = A.dead >= 0;
@@ -2540,16 +2494,15 @@ addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
   for (const p of [monsterPost, survivorPost]) p.comp.setSize(window.innerWidth, window.innerHeight);
   monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
-  monsterPost.echoPass.uniforms.uRes.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
 });
 monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
-monsterPost.echoPass.uniforms.uRes.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
-monsterPost.echoPass.uniforms.uFar.value = camera.far; monsterPost.echoPass.uniforms.uNear.value = camera.near;
+
 
 // ----------------------------------------------------------------------------
 //  MAIN LOOP
 // ----------------------------------------------------------------------------
 buildWorld();
+monsterSky.position.set(AREA / 2, 0, AREA / 2); scene.add(monsterSky);
 setViewMode('monster');
 
 // Embedded pages (the Claude artifact build) can't use WebRTC, so hide online play there.

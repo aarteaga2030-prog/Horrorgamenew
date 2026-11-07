@@ -18,7 +18,7 @@ python3 -m http.server 8000
 | | Survivors | Monster |
 |---|---|---|
 | Goal | Repair all 3 generators (hold **E**) to open the exit gate, then escape. Or stay alive until the 5:00 timer runs out. | Catch every survivor (2 hits each). |
-| Sees | A moonlit forest, plus a flashlight (**F**). | A dark green wireframe grid. The world is almost invisible until sound lights it up. |
+| Sees | A moonlit forest, plus a flashlight (**F**). | A dim green grid of light cast from its own eyes. Everything looks the same until sound lights it up. |
 | Movement | **WASD** / arrows. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** / arrows. **Shift** charge. |
 | Abilities | Repairing hums, which also makes noise. | **LMB** or **Space** strike. **Q** / **RMB** sonar shriek (reveals everything nearby; survivors hear it). |
 
@@ -33,8 +33,7 @@ A fenced, 120 m square of night forest:
 
 **Camouflage:**
 - **Monster:** standing still makes it drop into a listening crouch and fade out completely for survivors, shadow included. The monster's HUD shows when it is hidden.
-- **Survivors:** in monster vision a survivor is drawn only while making noise. Stay silent and within about 1.5 s you vanish completely: ripples pass straight through you.
-- **The counter:** the monster's sonar shriek. Every survivor within 30 m flashes up as a white outline for about a second as the wave (14 m/s) reaches them.
+- **Survivors:** in monster vision, survivors are drawn exactly like everything else, in the same dim grid with no outline or highlight. A still, silent survivor is just more surface. They only stand out when sound passes over them: their own noise, the monster's footsteps, or its sonar shriek (a 30 m wave).
 
 **Kills:** the monster rears up and slams its claws down, and the survivor falls backward. A survivor who is taken sees it in first person: they're turned to face the monster, then collapse to the floor. The match result waits until the final kill has played out.
 
@@ -57,14 +56,12 @@ Caught or escaped survivors become free-flying spectators and can press **V** to
 
 ### Monster vision (`game.js` → *MONSTER VISION*)
 - Every mesh keeps two materials, its normal `MeshStandardMaterial` and a sonar `ShaderMaterial`. `setViewMode()` swaps them for the whole scene.
-- The sonar shader outputs flat, unlit brightness: just how much sound touches each surface. It sums up to 48 **ripples**. Each ripple is an expanding spherical shell, `(origin, startTime, maxRadius, strength, speed)`, kept in a ring buffer of shared uniforms.
-- An **echo pass** turns that into a flat, drawn image:
-  - It inks contours from the second derivative of scene depth, so only silhouettes and creases are drawn, as on a black page.
-  - The ink glows where sound lands, and a halftone dot fill shows how bright each area is.
-  - The environment is barely visible until a ripple sweeps over it.
-- Survivors use their own material, which dissolves to nothing (a dithered discard) while they're silent.
+- **The grid is cast from the monster's eyes.** Lines are laid out by viewing angle (yaw and pitch from the camera, every 1.6°), not on each surface. They run unbroken across ground, trees and bodies, with no perspective foreshortening to show the shape or slope of anything.
+- **Depth is deliberately poor.** There's no shading, no distance falloff and no outlines. A grid-lit shell around the world, seen only in monster vision, continues the same grid past the treetops, so nothing shows as a silhouette against the sky.
+- **Sound is what reveals things.** The shader sums up to 48 **ripples**. Each ripple is an expanding spherical shell, `(origin, startTime, maxRadius, strength, speed)`, kept in a ring buffer of shared uniforms, and it brightens whatever surface it crosses.
+- **Players get no special treatment.** Survivors (and the monster, for spectators) use the same material as the world.
 - The monster's client creates ripples from each survivor's synced **noise** level. Crouching gives small, rare ripples (~4 m), walking gives medium ones, and sprinting gives large, frequent ones (~13 m). Repairs, hits, generators and the gate opening send out big pulses.
-- After the echo pass, the monster view gets UnrealBloom and a custom CRT pass (scanlines, barrel distortion, chromatic split and vignette). Survivors get a grain/vignette pass with a damage effect and a fear effect when the monster is near.
+- The monster view is finished with UnrealBloom and a custom CRT pass (scanlines, barrel distortion, chromatic split and vignette). Survivors get a grain/vignette pass with a damage effect and a fear effect when the monster is near.
 
 ### Signaling server
 By default, PeerJS uses its free public cloud server. To use your own [PeerServer](https://github.com/peers/peerjs-server), add query parameters:
