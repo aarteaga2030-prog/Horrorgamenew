@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -248,19 +249,159 @@ const survivorFog = new THREE.FogExp2(0x101722, 0.024);
 const clock = new THREE.Clock();
 let time = 0;
 
-// The view is either the survivors' 3D world or the monster's 2D sonar screen.
+// ----------------------------------------------------------------------------
+//  MONSTER VISION: world-space grid + sonar ripple shader
+// ----------------------------------------------------------------------------
+// Shared uniforms: every sonar material references the SAME objects, so pushing
+// one ripple updates the whole world in a single write.
+const sonarShared = {
+  uTime: { value: 0 },
+  uCamPos: { value: new THREE.Vector3() },
+  uRip: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector4(0, 0, 0, -999)) },  // xyz origin, w start time
+  uRipP: { value: Array.from({ length: CFG.MAX_RIPPLES }, () => new THREE.Vector3(0, 0, 1)) },       // x maxRadius, y strength, z speed
+};
+// Skinning chunks let animated (SkinnedMesh) characters deform in monster vision too.
+const SONAR_VERT = /* glsl */ `
+  #include <common>
+  #include <skinning_pars_vertex>
+  varying vec3 vWorld;
+  varying vec3 vNormalW;
+  void main() {
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    vec4 wp = modelMatrix * vec4(transformed, 1.0);
+    vWorld = wp.xyz;
+    vNormalW = normalize(mat3(modelMatrix) * objectNormal);
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }`;
+// Flat, unlit output: each surface is just "how much sound is touching it". The echo
+// post pass (below) turns this into outlines and halftone, so the monster sees a flat,
+// drawn image rather than lit 3D surfaces.
+const SONAR_FRAG = /* glsl */ `
+  uniform float uTime;
+  uniform vec3 uCamPos;
+  uniform vec4 uRip[MAXR];
+  uniform vec3 uRipP[MAXR];
+  uniform float uBase;      // ambient visibility of this surface (env is barely visible)
+  uniform float uGain;      // how strongly ripples light this surface
+  uniform float uGrid;      // (unused in the echo view; kept for material compatibility)
+  uniform float uNearGain;  // faint "touch" sense right around the monster
+  uniform vec3 uColor;
+  uniform float uSelf;      // survivors: 1 while making noise, 0 = not drawn at all
+  varying vec3 vWorld;
+  varying vec3 vNormalW;
+
+  void main() {
+    // Silent survivors dissolve out completely (dithered so the fade isn't a pop).
+    if (uSelf < 0.999) {
+      float h = fract(sin(dot(floor(gl_FragCoord.xy), vec2(12.9898, 78.233))) * 43758.5453);
+      if (h >= uSelf) discard;
+    }
+    float energy = 0.0;
+    for (int i = 0; i < MAXR; i++) {
+      vec4 r = uRip[i];
+      vec3 p = uRipP[i];
+      float age = uTime - r.w;
+      if (age < 0.0 || p.y <= 0.0) continue;
+      float rad = age * p.z;
+      if (rad > p.x) continue;
+      float d = distance(vWorld, r.xyz);
+      float w = 0.3 + rad * 0.06;
+      float ring = exp(-pow((d - rad) / w, 2.0));
+      float fill = (1.0 - smoothstep(0.0, rad + 0.001, d)) * 0.04;
+      float fade = 1.0 - rad / p.x;
+      fade *= fade;
+      energy += (ring + fill) * fade * p.y;
+    }
+    float dc = distance(vWorld, uCamPos);
+    float base = uBase * (1.0 - smoothstep(8.0, 45.0, dc));
+    float near = (1.0 - smoothstep(0.0, 5.0, dc)) * uNearGain;
+    gl_FragColor = vec4(uColor * (base + energy * uGain + near), 1.0);
+  }`;
+function makeSonarMaterial({ base, gain, grid, near, color }) {
+  return new THREE.ShaderMaterial({
+    defines: { MAXR: CFG.MAX_RIPPLES },
+    uniforms: Object.assign({}, sonarShared, {
+      uBase: { value: base }, uGain: { value: gain }, uGrid: { value: grid },
+      uNearGain: { value: near }, uColor: { value: new THREE.Color(color) }, uSelf: { value: 1 },
+    }),
+    vertexShader: SONAR_VERT,
+    fragmentShader: SONAR_FRAG,
+  });
+}
+const ENTITY_SONAR = { base: 0.25, gain: 2.6, grid: 0.2, near: 0.35, color: 0xd8fff0 };
+const SONAR_MATS = {
+  env: makeSonarMaterial({ base: 0.06, gain: 1.0, grid: 1.0, near: 0.25, color: 0x2bff7a }),
+  gen: makeSonarMaterial({ base: 0.35, gain: 1.0, grid: 0.25, near: 0.3, color: 0xb4ff3b }),   // objectives faintly visible
+  entity: makeSonarMaterial({ base: 0.0, gain: 2.6, grid: 0.2, near: 0.35, color: 0x9bffc4 }), // players: ONLY visible via noise
+};
+
+// Ripple ring buffer
+let rippleIdx = 0;
+function addRipple(pos, maxR, strength, speed) {
+  const i = rippleIdx; rippleIdx = (rippleIdx + 1) % CFG.MAX_RIPPLES;
+  sonarShared.uRip.value[i].set(pos.x, pos.y, pos.z, time);
+  sonarShared.uRipP.value[i].set(maxR, strength, speed || Math.max(7, maxR / 1.2));
+}
+function clearRipples() { for (const v of sonarShared.uRip.value) v.w = -999; }
+
+// Material swapping: each mesh owns a survivor material and a monster material.
+const swappables = [];
 let viewMode = 'monster';
+function reg(obj, kind = 'env') {
+  obj.traverse((o) => {
+    if (!o.isMesh) return;
+    const entry = { mesh: o, s: o.material, m: SONAR_MATS[kind] };
+    swappables.push(entry);
+    o.material = viewMode === 'monster' ? entry.m : entry.s;
+  });
+  return obj;
+}
+function unreg(obj) {
+  obj.traverse((o) => { const i = swappables.findIndex((e) => e.mesh === o); if (i >= 0) swappables.splice(i, 1); });
+}
+const survivorOnly = []; // lights, sprites, etc. that only exist in the survivor's world
 function setViewMode(mode) {
   viewMode = mode;
-  radar.canvas.classList.toggle('hidden', mode !== 'monster');
-  scene.fog = survivorFog;
-  scene.background = new THREE.Color(0x101722);
-  flashlight.visible = flashlightOn;
+  const mon = mode === 'monster';
+  for (const e of swappables) e.mesh.material = mon ? e.m : e.s;
+  for (const o of survivorOnly) o.visible = !mon;
+  scene.fog = mon ? null : survivorFog;
+  scene.background = new THREE.Color(mon ? 0x000000 : 0x101722);
+  flashlight.visible = !mon && flashlightOn;
 }
 
 // ----------------------------------------------------------------------------
 //  POST-PROCESSING
 // ----------------------------------------------------------------------------
+const SonarPostShader = {
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uRes: { value: new THREE.Vector2() }, uPulse: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse; uniform float uTime; uniform vec2 uRes; uniform float uPulse;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
+    void main(){
+      vec2 c = vUv - 0.5;
+      vec2 uv = 0.5 + c * (1.0 + 0.07 * dot(c, c));       // CRT barrel
+      float ab = 0.0015 + uPulse * 0.004;                   // chromatic split
+      vec3 col;
+      col.r = texture2D(tDiffuse, uv + vec2(ab, 0.0)).r;
+      col.g = texture2D(tDiffuse, uv).g;
+      col.b = texture2D(tDiffuse, uv - vec2(ab, 0.0)).b;
+      float scan = 0.82 + 0.18 * sin(uv.y * uRes.y * 1.3 + uTime * 6.0);
+      col *= scan;
+      col += vec3(0.0, 0.035, 0.015) * hash(uv * (uTime + 1.0));
+      float vig = smoothstep(0.85, 0.2, length(c));
+      col *= vig;
+      col += vec3(0.0, 0.08, 0.04) * uPulse * (1.0 - vig * 0.5);
+      if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) col = vec3(0.0);
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+};
 const SurvivorPostShader = {
   uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uDamage: { value: 0 }, uLowHp: { value: 0 }, uFear: { value: 0 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
@@ -282,172 +423,56 @@ const SurvivorPostShader = {
       gl_FragColor = vec4(col, 1.0);
     }`,
 };
-function buildComposer(passShader) {
+const EchoShader = {
+  uniforms: { tDiffuse: { value: null }, tDepth: { value: null }, uRes: { value: new THREE.Vector2(1, 1) }, uNear: { value: 0.05 }, uFar: { value: 400 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+  fragmentShader: /* glsl */ `
+    #include <packing>
+    uniform sampler2D tDiffuse; uniform sampler2D tDepth; uniform vec2 uRes; uniform float uNear; uniform float uFar;
+    varying vec2 vUv;
+    float lin(vec2 uv) { return -perspectiveDepthToViewZ(texture2D(tDepth, uv).x, uNear, uFar); }
+    float lum(vec2 uv) { vec3 c = texture2D(tDiffuse, uv).rgb; return max(c.r, max(c.g, c.b)); }
+    void main() {
+      vec2 px = 1.0 / uRes;
+      // Ink: second derivative of linear depth catches silhouettes and creases.
+      float d = lin(vUv);
+      float dl = lin(vUv - vec2(px.x, 0.0)), dr = lin(vUv + vec2(px.x, 0.0));
+      float du = lin(vUv + vec2(0.0, px.y)), dd = lin(vUv - vec2(0.0, px.y));
+      float edge = smoothstep(0.015, 0.06, (abs(dl + dr - 2.0 * d) + abs(du + dd - 2.0 * d)) / max(d, 0.5));
+      edge = max(edge, smoothstep(0.08, 0.3, abs(dl - dr) / max(d, 0.5) + abs(du - dd) / max(d, 0.5)));
+      // Sound light around this pixel (so outlines glow where a ripple touches them)
+      vec3 c = texture2D(tDiffuse, vUv).rgb;
+      float L = max(c.r, max(c.g, c.b));
+      float Ln = max(L, max(max(lum(vUv + vec2(px.x * 2.0, 0.0)), lum(vUv - vec2(px.x * 2.0, 0.0))), max(lum(vUv + vec2(0.0, px.y * 2.0)), lum(vUv - vec2(0.0, px.y * 2.0)))));
+      // Halftone fill: dot size follows brightness, like a printed sonar plate.
+      vec2 cell = mod(floor(gl_FragCoord.xy), 5.0) - 2.0;
+      float dotOn = step(length(cell) / 2.6, sqrt(clamp(L * 1.6, 0.0, 1.0)));
+      float far = 1.0 - smoothstep(25.0, 70.0, d);
+      float ink = edge * (0.07 * far + Ln * 2.0);
+      vec3 hue = L > 1e-4 ? c / L : vec3(0.17, 1.0, 0.48);
+      vec3 col = hue * (ink + dotOn * min(L * 1.4, 1.0) * 0.32);
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+};
+// ShaderPass that also hands the scene depth (from the render target) to the shader.
+class DepthShaderPass extends ShaderPass {
+  render(r, writeBuffer, readBuffer, dt, mask) { this.uniforms.tDepth.value = readBuffer.depthTexture; super.render(r, writeBuffer, readBuffer, dt, mask); }
+}
+function buildComposer(passShader, bloom, echo = false) {
   const comp = new EffectComposer(renderer);
+  if (echo) { comp.renderTarget1.depthTexture = new THREE.DepthTexture(); comp.renderTarget2.depthTexture = new THREE.DepthTexture(); }
   comp.addPass(new RenderPass(scene, camera));
+  let echoPass = null;
+  if (echo) { echoPass = new DepthShaderPass(EchoShader); comp.addPass(echoPass); }
+  let bloomPass = null;
+  if (bloom) { bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.85, 0.5, 0.03); comp.addPass(bloomPass); }
   const pass = new ShaderPass(passShader);
   comp.addPass(pass);
   comp.addPass(new OutputPass());
-  return { comp, pass };
+  return { comp, pass, bloomPass, echoPass };
 }
-const survivorPost = buildComposer(SurvivorPostShader);
-
-// ----------------------------------------------------------------------------
-//  SOUND RIPPLES + THE MONSTER'S SONAR SCREEN (2D)
-// ----------------------------------------------------------------------------
-// The monster is blind. Instead of a 3D view it reads a flat, heading-up sonar plate:
-// obstacles appear only where sound rings sweep across them (with a short afterglow),
-// and survivors are invisible unless they make noise.
-const RIPPLES = Array.from({ length: CFG.MAX_RIPPLES }, () => ({ x: 0, z: 0, start: -999, maxR: 0, str: 0, speed: 1 }));
-let rippleIdx = 0;
-function addRipple(pos, maxR, strength, speed) {
-  const r = RIPPLES[rippleIdx]; rippleIdx = (rippleIdx + 1) % CFG.MAX_RIPPLES;
-  r.x = pos.x; r.z = pos.z; r.start = time; r.maxR = maxR; r.str = strength; r.speed = speed || Math.max(7, maxR / 1.2);
-}
-function clearRipples() { for (const r of RIPPLES) r.start = -999; }
-
-const radar = { canvas: $('#radar'), ctx: null, feats: [], glow: null, pulse: 0, swipe: 0, shake: 0, zoom: 24, w: 1, h: 1, dpr: 1, scan: null };
-radar.ctx = radar.canvas.getContext('2d');
-function resizeRadar() {
-  radar.dpr = Math.min(window.devicePixelRatio || 1, 2);
-  radar.w = radar.canvas.width = Math.round(window.innerWidth * radar.dpr);
-  radar.h = radar.canvas.height = Math.round(window.innerHeight * radar.dpr);
-  // Scanline pattern, built once per size
-  const p = document.createElement('canvas'); p.width = 4; p.height = Math.max(3, Math.round(3 * radar.dpr));
-  const pg = p.getContext('2d'); pg.fillStyle = 'rgba(0,0,0,0.35)'; pg.fillRect(0, 0, 4, Math.max(1, Math.round(radar.dpr)));
-  radar.scan = radar.ctx.createPattern(p, 'repeat');
-}
-// Everything solid is drawable; bushes are added separately (cover, not solid).
-function buildRadarFeatures(bushes) {
-  for (const c of COLLIDERS) {
-    if (c.t === 0) radar.feats.push({ k: c.tag, t: 0, x: c.x, z: c.z, r: c.r });
-    else radar.feats.push({ k: c.tag, t: 1, x: (c.minX + c.maxX) / 2, z: (c.minZ + c.maxZ) / 2, x0: c.minX, z0: c.minZ, x1: c.maxX, z1: c.maxZ });
-  }
-  for (const [x, z, r] of bushes) radar.feats.push({ k: 'bush', t: 0, x, z, r });
-  radar.glow = new Float32Array(radar.feats.length);
-}
-const featDist = (f, x, z) => f.t === 0
-  ? Math.max(0, Math.hypot(f.x - x, f.z - z) - f.r)
-  : Math.hypot(x - clamp(x, f.x0, f.x1), z - clamp(z, f.z0, f.z1));
-// Sound energy reaching a feature right now, from every live ripple.
-function featSound(f) {
-  let e = 0;
-  for (const r of RIPPLES) {
-    const age = time - r.start;
-    if (age < 0 || r.str <= 0) continue;
-    const rad = age * r.speed;
-    if (rad > r.maxR) continue;
-    const d = featDist(f, r.x, r.z), w = 0.6 + rad * 0.05;
-    const fade = (1 - rad / r.maxR) ** 2;
-    e += (Math.exp(-(((d - rad) / w) ** 2)) + (d < rad ? 0.05 : 0)) * fade * r.str;
-  }
-  return e;
-}
-const GREEN = (a) => `rgba(60,255,140,${a})`;
-// V: { x, z, yaw, R (metres from centre to the nearest screen edge), self, lobby, spectator }
-function drawRadar(dt, V) {
-  const g = radar.ctx, W = radar.w, H = radar.h, dpr = radar.dpr;
-  const s = Math.min(W, H) / (2 * V.R);
-  const shake = radar.shake > 0 ? (Math.random() - 0.5) * radar.shake * 18 * dpr : 0;
-  const cx = W / 2 + shake, cy = (V.lobby ? H / 2 : H * 0.6) + shake;
-  const fx = -Math.sin(V.yaw), fz = -Math.cos(V.yaw), rx = Math.cos(V.yaw), rz = -Math.sin(V.yaw);
-  const P = (x, z) => { const dx = x - V.x, dz = z - V.z; return [cx + (dx * rx + dz * rz) * s, cy - (dx * fx + dz * fz) * s]; };
-  radar.pulse = Math.max(0, radar.pulse - dt * 1.5); radar.swipe = Math.max(0, radar.swipe - dt); radar.shake = Math.max(0, radar.shake - dt);
-
-  g.globalCompositeOperation = 'source-over';
-  g.fillStyle = '#010503'; g.fillRect(0, 0, W, H);
-  // The plate: range rings every 10 m, bearing lines every 30 degrees, north marker
-  g.lineWidth = dpr; g.strokeStyle = GREEN(0.09); g.fillStyle = GREEN(0.25);
-  g.font = `${10 * dpr}px "Courier New", monospace`; g.textAlign = 'center';
-  const maxR = Math.hypot(W, H) / s;
-  for (let m = 10; m < maxR; m += 10) { g.beginPath(); g.arc(cx, cy, m * s, 0, Math.PI * 2); g.stroke(); if (!V.lobby) g.fillText(m + 'm', cx + 2 * dpr, cy - m * s - 3 * dpr); }
-  for (let k = 0; k < 12; k++) { const a = (k / 12) * Math.PI * 2; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * W * 2, cy + Math.sin(a) * W * 2); g.stroke(); }
-  if (!V.lobby) { const [nx, ny] = P(V.x, V.z - 1); const a = Math.atan2(ny - cy, nx - cx), rr = Math.min(W, H) * 0.46; g.fillStyle = GREEN(0.5); g.fillText('N', cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); }
-
-  // Features, lit by sound
-  g.globalCompositeOperation = 'lighter';
-  const decay = Math.exp(-dt * 1.3), F = radar.feats, G = radar.glow, cull = V.R * 1.8;
-  for (let i = 0; i < F.length; i++) {
-    const f = F[i], dm = Math.hypot(f.x - V.x, f.z - V.z);
-    if (dm > cull) { G[i] *= decay; continue; }
-    const touch = V.lobby ? 0.05 : Math.max(0, 1 - dm / 4.5) * 0.6; // a faint sense of what's right beside it
-    G[i] = Math.max(G[i] * decay, featSound(f) * 1.3 + touch);
-    let a = Math.min(1, G[i]);
-    if (f.k === 'gate' && game.gateOpen) continue;
-    if (f.k === 'gen' || f.k === 'gate') a = Math.max(a, 0.3); // objectives are always faintly known
-    if (a < 0.03) continue;
-    const [px, py] = P(f.x, f.z);
-    if (f.t === 0) {
-      if (f.k === 'tree') {
-        g.fillStyle = GREEN(a); g.beginPath(); g.arc(px, py, Math.max(f.r, 0.3) * s, 0, Math.PI * 2); g.fill();
-        g.strokeStyle = GREEN(a * 0.3); g.beginPath(); g.arc(px, py, 1.7 * s, 0, Math.PI * 2); g.stroke();   // canopy
-      } else if (f.k === 'bush') {
-        g.strokeStyle = GREEN(a * 0.55); g.setLineDash([3 * dpr, 4 * dpr]); g.beginPath(); g.arc(px, py, f.r * s, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
-      } else if (f.k === 'fire') {
-        g.strokeStyle = GREEN(a); g.beginPath();
-        for (let k = 0; k < 8; k++) { const an = (k / 8) * Math.PI * 2; g.moveTo(px, py); g.lineTo(px + Math.cos(an) * f.r * s * 1.4, py + Math.sin(an) * f.r * s * 1.4); }
-        g.stroke();
-      } else { // rocks and logs: rough polygons
-        g.fillStyle = GREEN(a * 0.6); g.strokeStyle = GREEN(a); g.beginPath();
-        for (let k = 0; k < 6; k++) { const an = (k / 6) * Math.PI * 2 + f.x; const rr = f.r * s * (0.85 + 0.15 * Math.sin(k * 2.3 + f.z)); k ? g.lineTo(px + Math.cos(an) * rr, py + Math.sin(an) * rr) : g.moveTo(px + Math.cos(an) * rr, py + Math.sin(an) * rr); }
-        g.closePath(); g.fill(); g.stroke();
-      }
-    } else {
-      const c = [P(f.x0, f.z0), P(f.x1, f.z0), P(f.x1, f.z1), P(f.x0, f.z1)];
-      const gen = f.k === 'gen';
-      const st = gen ? game.gens[GENS.findIndex((G2) => Math.abs(G2.x - f.x) < 1 && Math.abs(G2.z - f.z) < 1)] : null;
-      g.fillStyle = gen ? (st?.done ? `rgba(90,140,90,${a * 0.5})` : `rgba(200,255,80,${a * 0.75})`) : GREEN(a * 0.75);
-      g.beginPath(); g.moveTo(...c[0]); g.lineTo(...c[1]); g.lineTo(...c[2]); g.lineTo(...c[3]); g.closePath(); g.fill();
-      if (gen && st && !st.done && st.progress > 0) { g.strokeStyle = `rgba(255,220,80,${0.4 + 0.4 * Math.sin(time * 8)})`; g.lineWidth = 2 * dpr; g.stroke(); g.lineWidth = dpr; }
-    }
-  }
-  // The sound itself: expanding rings, with a blip where each one started
-  for (const r of RIPPLES) {
-    const age = time - r.start;
-    if (age < 0 || r.str <= 0) continue;
-    const rad = age * r.speed;
-    if (rad > r.maxR) continue;
-    const fade = (1 - rad / r.maxR) ** 1.5, [px, py] = P(r.x, r.z);
-    g.strokeStyle = GREEN(Math.min(1, r.str) * fade * 0.7); g.lineWidth = 2 * dpr;
-    g.beginPath(); g.arc(px, py, rad * s, 0, Math.PI * 2); g.stroke();
-    if (age < 0.9) { g.fillStyle = `rgba(220,255,235,${(1 - age / 0.9) * Math.min(1, r.str + 0.3)})`; g.beginPath(); g.arc(px, py, 3.5 * dpr, 0, Math.PI * 2); g.fill(); }
-  }
-  g.lineWidth = dpr;
-  // Survivors caught by a shriek flash up as white figures; spectators also see the monster.
-  for (const r of players.values()) {
-    if (r.status !== 'alive') continue;
-    if (!r.isMonster) {
-      const A = r.anim, t0 = A?.revealAt;
-      if (t0 === undefined || time < t0 || time > t0 + 1.2) continue;
-      const a = 1 - (time - t0) / 1.2, [px, py] = P(r.pos.x, r.pos.z);
-      g.fillStyle = `rgba(235,255,245,${a})`; g.beginPath(); g.arc(px, py, Math.max(0.4 * s, 4 * dpr), 0, Math.PI * 2); g.fill();
-      g.strokeStyle = `rgba(235,255,245,${a * 0.6})`; g.beginPath(); g.arc(px, py, Math.max(0.9 * s, 9 * dpr), 0, Math.PI * 2); g.stroke();
-    } else if (V.spectator) {
-      const [px, py] = P(r.pos.x, r.pos.z), ang = r.yaw - V.yaw;
-      drawMonsterIcon(g, px, py, -ang, s, dpr, 'rgba(255,80,60,0.9)');
-    }
-  }
-  // The monster itself at the centre, pointing up, with its reach
-  if (V.self) {
-    g.fillStyle = GREEN(0.05 + radar.swipe * 1.6); g.beginPath(); g.moveTo(cx, cy);
-    g.arc(cx, cy, CFG.ATTACK_RANGE * s, -Math.PI / 2 - 0.7, -Math.PI / 2 + 0.7); g.closePath(); g.fill();
-    drawMonsterIcon(g, cx, cy, 0, s, dpr, 'rgba(200,255,220,0.95)');
-  }
-  // Screen treatment: shriek flash, scanlines, vignette, flicker
-  g.globalCompositeOperation = 'source-over';
-  if (radar.pulse > 0) { g.fillStyle = GREEN(radar.pulse * 0.12); g.fillRect(0, 0, W, H); }
-  g.fillStyle = radar.scan; g.fillRect(0, 0, W, H);
-  const vg = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.hypot(W, H) * 0.55);
-  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.85)');
-  g.fillStyle = vg; g.fillRect(0, 0, W, H);
-  if (Math.random() < 0.04) { g.fillStyle = 'rgba(60,255,140,0.025)'; g.fillRect(0, 0, W, H); }
-}
-function drawMonsterIcon(g, x, y, ang, s, dpr, col) {
-  const L = Math.max(0.9 * s, 12 * dpr);
-  g.save(); g.translate(x, y); g.rotate(ang);
-  g.fillStyle = col; g.beginPath(); g.moveTo(0, -L); g.lineTo(L * 0.55, L * 0.6); g.lineTo(0, L * 0.3); g.lineTo(-L * 0.55, L * 0.6); g.closePath(); g.fill();
-  g.restore();
-}
+const monsterPost = buildComposer(SonarPostShader, true, true);
+const survivorPost = buildComposer(SurvivorPostShader, false);
 
 // ----------------------------------------------------------------------------
 //  PROCEDURAL TEXTURES (no external assets)
@@ -555,7 +580,7 @@ function flushChunks() {
   for (const { kind, geos } of chunks.values()) {
     const m = new THREE.Mesh(mergeGeometries(geos.map((g) => g.index ? g.toNonIndexed() : g)), MAT[kind]);
     m.castShadow = kind !== 'bush'; m.receiveShadow = true;
-    scene.add(m);
+    scene.add(reg(m));
   }
   chunks.clear();
 }
@@ -651,7 +676,7 @@ function buildCabin(c, i) {
     g.add(win);
   }
   const lamp = new THREE.PointLight(0xffa860, 6, 9, 1.6); lamp.position.set(c.x + (c.split ? -c.w / 4 - 0.3 : 0), 2.2, c.z);
-  g.add(lamp);
+  g.add(lamp); survivorOnly.push(lamp);
   world.flickers.push({ light: lamp, base: 6, phase: i * 13.7, kind: 'lamp' });
   // Furniture (colliders too)
   const furn = [];
@@ -661,7 +686,7 @@ function buildCabin(c, i) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, fd), stdMat({ map: TEX.crate })); m.position.set(fx, fh / 2, fz); m.castShadow = true;
     g.add(m); addBox(fx - fw / 2, fz - fd / 2, fx + fw / 2, fz + fd / 2, 'furniture');
   }
-  scene.add(g);
+  scene.add(reg(g));
 }
 
 function buildGenerator(i) {
@@ -677,7 +702,8 @@ function buildGenerator(i) {
   const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), lampMat); lamp.position.set(0, 1.05, 0.46);
   for (const m of [body, tank, pipe]) { m.castShadow = true; m.receiveShadow = true; }
   g.add(body, tank, pipe, lamp);
-  const light = new THREE.PointLight(0xff3010, 3, 7, 2); light.position.set(0, 1.4, 0.8); g.add(light);
+  reg(g, 'gen');
+  const light = new THREE.PointLight(0xff3010, 3, 7, 2); light.position.set(0, 1.4, 0.8); g.add(light); survivorOnly.push(light);
   scene.add(g);
   // Footprint: 1.3 x 0.9 m, rotated with the generator
   const hx = Math.abs(Math.cos(G.ry)) * 0.65 + Math.abs(Math.sin(G.ry)) * 0.45, hz = Math.abs(Math.sin(G.ry)) * 0.65 + Math.abs(Math.cos(G.ry)) * 0.45;
@@ -685,7 +711,6 @@ function buildGenerator(i) {
   world.gens.push({ group: g, lampMat, light, pos: genPos(i), shake: 0 });
 }
 
-const BUSHES = [];
 function buildWorld() {
   const rng = mulberry32(1337);
   MAT.bark = stdMat({ map: TEX.bark });
@@ -697,14 +722,14 @@ function buildWorld() {
   // Ground and dirt paths
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND, GROUND), stdMat({ map: TEX.ground, roughness: 1 }));
   ground.rotation.x = -Math.PI / 2; ground.position.set(AREA / 2, 0, AREA / 2); ground.receiveShadow = true;
-  scene.add(ground);
+  scene.add(reg(ground));
   const pathMat = stdMat({ map: TEX.path, polygonOffset: true, polygonOffsetFactor: -2 });
   for (const p of PATHS) for (let i = 0; i < p.length - 1; i++) {
     const [ax, az] = p[i], [bx, bz] = p[i + 1], len = Math.hypot(bx - ax, bz - az);
     const seg = new THREE.Mesh(new THREE.PlaneGeometry(2.6, len + 2.4), pathMat);
     seg.rotation.x = -Math.PI / 2; seg.rotation.z = -Math.atan2(bx - ax, bz - az);
     seg.position.set((ax + bx) / 2, 0.012 + i * 0.001, (az + bz) / 2); seg.receiveShadow = true;
-    scene.add(seg);
+    scene.add(reg(seg));
   }
 
   // Cabins and generators
@@ -720,11 +745,11 @@ function buildWorld() {
   for (let i = 0; i < 3; i++) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.1, 6), MAT.bark); l.rotation.set(Math.PI / 2, 0, i * 1.05); l.position.y = 0.12; fire.add(l); }
   const flameMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.85, toneMapped: false });
   const flames = [];
-  for (let i = 0; i < 4; i++) { const f = new THREE.Mesh(new THREE.ConeGeometry(0.22 - i * 0.03, 0.8 - i * 0.1, 6), flameMat); f.position.set((rng() - 0.5) * 0.25, 0.45, (rng() - 0.5) * 0.25); fire.add(f); flames.push(f); }
-  const fireLight = new THREE.PointLight(0xff8a3a, 14, 16, 1.6); fireLight.position.y = 1.0; fire.add(fireLight);
+  for (let i = 0; i < 4; i++) { const f = new THREE.Mesh(new THREE.ConeGeometry(0.22 - i * 0.03, 0.8 - i * 0.1, 6), flameMat); f.position.set((rng() - 0.5) * 0.25, 0.45, (rng() - 0.5) * 0.25); fire.add(f); flames.push(f); survivorOnly.push(f); }
+  const fireLight = new THREE.PointLight(0xff8a3a, 14, 16, 1.6); fireLight.position.y = 1.0; fire.add(fireLight); survivorOnly.push(fireLight);
   // Logs to sit on
   for (const a of [0.4, 2.3, 4.2]) { const l = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 1.8, 8), MAT.bark); l.rotation.set(0, -a, Math.PI / 2); l.position.set(Math.cos(a) * 2.6, 0.22, Math.sin(a) * 2.6); l.castShadow = true; fire.add(l); }
-  scene.add(fire);
+  scene.add(reg(fire));
   addCircle(CAMPFIRE.x, CAMPFIRE.z, 0.95, 'fire');
   world.fire = { flames, light: fireLight };
   world.flickers.push({ light: fireLight, base: 14, phase: 0, kind: 'fire' });
@@ -744,12 +769,12 @@ function buildWorld() {
   side(EXIT_ZONE.minX - 0.2, F1, EXIT_ZONE.minX - 0.2, EXIT_ZONE.maxZ); side(EXIT_ZONE.maxX + 0.2, F1, EXIT_ZONE.maxX + 0.2, EXIT_ZONE.maxZ);
   side(EXIT_ZONE.minX - 0.2, EXIT_ZONE.maxZ, EXIT_ZONE.maxX + 0.2, EXIT_ZONE.maxZ);
   const fence = new THREE.Mesh(mergeGeometries(fenceGeos), MAT.fence); fence.castShadow = fence.receiveShadow = true;
-  scene.add(fence);
+  scene.add(reg(fence));
   // Sliding chain-link gate
   const gateMat = new THREE.MeshStandardMaterial({ map: TEX.gate, transparent: true, alphaTest: 0.3, side: THREE.DoubleSide, metalness: 0.6, roughness: 0.5 });
   const gate = new THREE.Mesh(new THREE.PlaneGeometry(GATE.w, 2.2), gateMat);
   gate.position.set(GATE.x, 1.1, F1); gate.castShadow = true;
-  scene.add(gate);
+  scene.add(reg(gate, 'gen'));
   addBox(gx0, F1 - 0.15, gx1, F1 + 0.15, 'gate');
   world.gate = { mesh: gate, x0: GATE.x };
   const signTex = canvasTex(256, (g, s) => {
@@ -759,10 +784,10 @@ function buildWorld() {
   signTex.repeat.set(1, 2);
   const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.35), new THREE.MeshBasicMaterial({ map: signTex, toneMapped: false, side: THREE.DoubleSide }));
   sign.position.set(GATE.x, 2.6, F1 - 0.05); sign.rotation.y = Math.PI;
-  scene.add(sign);
-  for (const s of [-1, 1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.9, 0.25), MAT.fence); post.position.set(GATE.x + s * (GATE.w / 2 + 0.15), 1.45, F1); scene.add(post); }
+  scene.add(reg(sign, 'gen'));
+  for (const s of [-1, 1]) { const post = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.9, 0.25), MAT.fence); post.position.set(GATE.x + s * (GATE.w / 2 + 0.15), 1.45, F1); scene.add(reg(post)); }
   const exitLight = new THREE.PointLight(0x2cff70, 5, 12, 1.8); exitLight.position.set(GATE.x, 2.4, F1 - 1.2);
-  scene.add(exitLight); world.exitLight = exitLight;
+  scene.add(exitLight); survivorOnly.push(exitLight); world.exitLight = exitLight;
 
   // Trees: blue-noise scatter inside the fence (with colliders) and a dense wall outside it.
   const treeGrid = new Map(), cellOf = (x, z) => Math.floor(x / 3) + ',' + Math.floor(z / 3);
@@ -808,7 +833,6 @@ function buildWorld() {
       geo.scale(1.2, 0.75, 1.2); geo.translate(x + (rng() - 0.5) * 1.2, r * 0.55, z + (rng() - 0.5) * 1.2);
       addToChunk('bush', geo, x, z);
     }
-    BUSHES.push([x, z, 1.3]);
     n++;
   }
   flushChunks();
@@ -821,13 +845,13 @@ function buildWorld() {
   }
   const starGeo = new THREE.BufferGeometry(); starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
   const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xcfd8ff, size: 0.9, sizeAttenuation: false, fog: false }));
-  scene.add(stars);
+  scene.add(stars); survivorOnly.push(stars);
   const moon = new THREE.Mesh(new THREE.SphereGeometry(6, 20, 16), new THREE.MeshBasicMaterial({ color: 0xdfe6ff, fog: false }));
-  moon.position.set(AREA / 2 - 90, 110, AREA / 2 - 120); scene.add(moon);
+  moon.position.set(AREA / 2 - 90, 110, AREA / 2 - 120); scene.add(moon); survivorOnly.push(moon);
 
   // Moonlight + sky/ground ambient
   const moonLight = new THREE.DirectionalLight(0xa9bde0, 1.6); moonLight.position.set(-60, 100, -80); moonLight.target.position.set(AREA / 2, 0, AREA / 2);
-  scene.add(moonLight, moonLight.target);
+  scene.add(moonLight, moonLight.target); survivorOnly.push(moonLight);
   scene.add(new THREE.HemisphereLight(0x6a7ea6, 0x2a2216, 2.4));
 
   buildNav();
@@ -857,6 +881,7 @@ function makeLabel(text) {
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: true, transparent: true, fog: false }));
   s.scale.set(1.2, 0.3, 1);
+  survivorOnly.push(s); s.visible = viewMode !== 'monster';
   return s;
 }
 // ---- GLB character models (assets/), loaded once and cloned per player
@@ -1185,6 +1210,11 @@ function makeSurvivorAvatar(name, colorIdx) {
       lUp: find(/LeftUpLeg_/), rUp: find(/RightUpLeg_/), lLeg: find(/LeftLeg_/), rLeg: find(/RightLeg_/),
       lFoot: find(/LeftFoot_/), rFoot: find(/RightFoot_/),
     };
+    reg(g, 'entity');
+    // Own sonar material: uSelf fades between "lit by its own noise" and "just more background".
+    const sonar = makeSonarMaterial(ENTITY_SONAR);
+    for (const e of swappables) if (e.mesh.parent && g.getObjectById(e.mesh.id)) { e.m = sonar; if (viewMode === 'monster') e.mesh.material = sonar; }
+    g.userData.sonar = sonar;
     const label = makeLabel(name); label.position.y = 2.05; g.add(label);
     g.userData.rig = rig;
     scene.add(g);
@@ -1198,6 +1228,7 @@ function makeSurvivorAvatar(name, colorIdx) {
   torch.rotation.x = Math.PI / 2; torch.position.set(0.24, 1.1, -0.28);
   for (const m of [body, head, torch]) m.castShadow = true;
   rig.add(body, head, torch);
+  reg(g, 'entity');
   const label = makeLabel(name); label.position.y = 1.95; g.add(label);
   g.userData.rig = rig;
   scene.add(g);
@@ -1216,6 +1247,7 @@ function makeMonsterAvatar() {
       o.material = m; mats.push(m); meshes.push(o);
     });
     rig.add(model);
+    reg(g, 'entity');
     const bones = {}; model.traverse((o) => { if (o.isBone) bones[o.name] = o; });
     g.userData.monster = { anim: makeMonsterAnimator(model), mats, meshes, bones, camo: 0, stillT: 0, look: 0, spasms: [], nextSpasm: time + 1 + Math.random() * 3 };
     g.userData.rig = rig;
@@ -1237,6 +1269,7 @@ function makeMonsterAvatar() {
     rig.add(arm); arm.name = side < 0 ? 'armL' : 'armR';
   }
   rig.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  reg(g, 'entity');
   g.userData.rig = rig;
   scene.add(g);
   return g;
@@ -1828,7 +1861,8 @@ function addRemote(p) {
 }
 function removeRemote(id) {
   const r = players.get(id); if (!r) return;
-  scene.remove(r.avatar);
+  unreg(r.avatar); scene.remove(r.avatar);
+  r.avatar.traverse((o) => { const i = survivorOnly.indexOf(o); if (i >= 0) survivorOnly.splice(i, 1); });
   players.delete(id);
 }
 function leaveMatch() {
@@ -1902,7 +1936,7 @@ function onEvent(e) {
         if (r) { if (lethal) { r.status = 'caught'; r.anim.deadDelay = m ? KILL.raise + 0.05 : 0.01; } else r.anim.flinch = 1; }
         if (me.isMonster) {
           sfx.hit(); addFeed(lethal ? `You took ${e.name}.` : `You wounded ${e.name}.`, 'good');
-          if (lethal) { me.lunge = 1.6; radar.pulse = 1.4; radar.shake = 0.5; }
+          if (lethal) { me.lunge = 1.6; monsterPost.pass.uniforms.uPulse.value = 1.4; }
         } else { addFeed(lethal ? `${e.name} was taken.` : `${e.name} was wounded.`, 'bad'); noise({ dur: 0.4, vol: 0.25 * distVol(pos, 40), pan: panOf(pos), freq: 600 }); }
       }
       break;
@@ -2002,11 +2036,6 @@ document.addEventListener('pointerlockchange', () => {
 document.addEventListener('pointerlockerror', useDragLook);
 $('#resume').addEventListener('click', () => { initAudio(); lockPointer(); });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-// Mouse wheel zooms the monster's sonar screen (14-40 m to the screen edge).
-addEventListener('wheel', (e) => {
-  if (game.phase !== 'playing' || viewMode !== 'monster') return;
-  radar.zoom = clamp(radar.zoom * (e.deltaY > 0 ? 1.1 : 1 / 1.1), 14, 40);
-}, { passive: true });
 
 // Locked mouse look
 document.addEventListener('mousemove', (e) => {
@@ -2046,7 +2075,7 @@ canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === drag.id) drag = null; });
 function monsterAttack() {
   if (!me.isMonster || me.status !== 'alive' || me.attackCD > 0) return;
-  me.attackCD = CFG.ATTACK_CD; me.lunge = 1; radar.swipe = 0.25;
+  me.attackCD = CFG.ATTACK_CD; me.lunge = 1;
   sfx.swipe();
   // a short forward lunge
   moveWithCollision(me.pos, -Math.sin(me.yaw) * 0.6, -Math.cos(me.yaw) * 0.6, CFG.MON_R);
@@ -2057,7 +2086,7 @@ function monsterSonar() {
   me.sonarCD = CFG.SONAR_CD;
   addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), 30, 1.3, 14);
   revealSurvivors(me.pos.x, me.pos.z);
-  radar.pulse = 1;
+  monsterPost.pass.uniforms.uPulse.value = 1;
   sfx.ping();
   sendToHost({ t: 'sonar' });
 }
@@ -2216,6 +2245,12 @@ function revealSurvivors(x, z) {
 }
 function animateSurvivor(r, dt) {
   const a = r.avatar, A = r.anim, rig = a.userData.rig, B = a.userData.bones;
+  // In monster vision a survivor stands out only while making noise; standing still they
+  // fade back into the environment grid over ~1.5 s.
+  const revealed = A.revealAt !== undefined && time > A.revealAt && time < A.revealAt + 1.2;
+  const loud = r.noise > 0.05 || r.repairing || A.flinch > 0.1 || A.dead >= 0 || revealed;
+  A.self = loud ? Math.min(1, (A.self ?? 0) + dt * 6) : Math.max(0, (A.self ?? 0) - dt * 0.7);
+  if (a.userData.sonar) a.userData.sonar.uniforms.uSelf.value = A.self;
   A.flinch = Math.max(0, A.flinch - dt * 2.5);
   if (A.deadDelay > 0) { A.deadDelay -= dt; if (A.deadDelay <= 0) A.dead = 0; }
   const dead = A.dead >= 0;
@@ -2381,6 +2416,7 @@ function updateWorld(dt, monsterDist) {
   if (world.exitLight) world.exitLight.color.setHex(game.gateOpen ? 0x2cff70 : 0xff2a10);
 
   // Post-process uniforms
+  const sp = monsterPost.pass.uniforms; sp.uTime.value = time; sp.uPulse.value = Math.max(0, sp.uPulse.value - dt * 1.5);
   const vp = survivorPost.pass.uniforms; vp.uTime.value = time; vp.uDamage.value = me.damage * 0.8;
   vp.uLowHp.value = !me.isMonster && me.status === 'alive' && me.hp === 1 ? 1 : 0;
   vp.uFear.value = !me.isMonster && me.status === 'alive' ? clamp(1 - monsterDist / 14, 0, 1) : 0;
@@ -2439,6 +2475,7 @@ function updateLobbyCamera(dt) {
     const n = Math.random();
     addRipple(p.setY(0.05), 4 + n * 14, 0.4 + n);
   }
+  monsterPost.pass.uniforms.uTime.value = time;
 }
 
 // ----------------------------------------------------------------------------
@@ -2501,16 +2538,18 @@ $('#btn-rematch').onclick = () => playVsBots(quickRole);
 addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  survivorPost.comp.setSize(window.innerWidth, window.innerHeight);
-  resizeRadar();
+  for (const p of [monsterPost, survivorPost]) p.comp.setSize(window.innerWidth, window.innerHeight);
+  monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
+  monsterPost.echoPass.uniforms.uRes.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
 });
-resizeRadar();
+monsterPost.pass.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
+monsterPost.echoPass.uniforms.uRes.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+monsterPost.echoPass.uniforms.uFar.value = camera.far; monsterPost.echoPass.uniforms.uNear.value = camera.near;
 
 // ----------------------------------------------------------------------------
 //  MAIN LOOP
 // ----------------------------------------------------------------------------
 buildWorld();
-buildRadarFeatures(BUSHES);
 setViewMode('monster');
 
 // Embedded pages (the Claude artifact build) can't use WebRTC, so hide online play there.
@@ -2526,6 +2565,7 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05) * DEBUG.dtScale;
   time += dt;
+  sonarShared.uTime.value = time;
 
   if (game.phase === 'playing' || game.phase === 'ended') {
     if (game.phase === 'playing') updateLocal(dt);
@@ -2538,11 +2578,8 @@ function animate() {
     updateWorld(dt, Infinity);
   }
 
-  if (viewMode === 'monster') {
-    // 2D sonar screen; the 3D scene isn't rendered at all for the monster.
-    if (game.phase === 'menu' || game.phase === 'lobby') drawRadar(dt, { x: AREA / 2, z: AREA / 2, yaw: time * 0.03, R: 62, lobby: true });
-    else drawRadar(dt, { x: me.pos.x, z: me.pos.z, yaw: me.yaw, R: me.isMonster ? radar.zoom : 26, self: me.isMonster, spectator: !me.isMonster });
-  } else survivorPost.comp.render(dt);
+  sonarShared.uCamPos.value.copy(camera.position);
+  (viewMode === 'monster' ? monsterPost : survivorPost).comp.render(dt);
 }
 animate();
 
