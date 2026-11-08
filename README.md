@@ -41,8 +41,16 @@ Caught or escaped survivors become free-flying spectators and can press **V** to
 
 ### Playing against bots
 **Play vs bot** starts an offline match straight away:
-- **Play as survivor**: a bot monster hunts you. It's blind too. It hears you within a radius set by your noise (sprinting ≈ 24 m, walking ≈ 12 m, crouching ≈ 3.6 m), investigates what it heard, and shrieks to reveal you when it loses the trail.
-- **Play as monster**: two bot survivors split up to repair generators and run for the exit once the gate opens. When they notice you, they freeze silently, then crouch-sneak away. They only sprint if you're right on top of them or they've been hit. A moving monster is noticed from 14 m away, a still (camouflaged) one only within 4.5 m.
+- **Play as survivor**: a bot monster hunts you, and it's blind too.
+  - **Hearing:** it hears you within a radius set by your noise (sprinting ≈ 24 m, walking ≈ 12 m, crouching ≈ 3.6 m).
+  - **Pace:** it prowls slowly between generators (favouring ones mid-repair) and stops every few seconds to listen, fading from sight while it does.
+  - **Hunting:** it creeps toward what it heard, and only gallops in a short charge at a fresh, close sound.
+  - **Lost trail:** where it last heard you it listens, shrieks, then sweeps the area. Once the gate opens it guards it.
+- **Play as monster**: two bot survivors who play by stealth.
+  - **What they know:** only what they could really see or hear. That's a moving monster within 14 m, a still one within 4 m, its charging footsteps within 22 m, and its shriek.
+  - **Reacting:** when they notice you, they freeze silently, then creep away sideways in a crouch, which is too quiet for you to hear beyond ~3.6 m.
+  - **Sprinting:** only in a short burst when you charge right at them or hit them, then they go quiet again.
+  - **Caution:** they won't repair (the hum carries ~13 m) while you were recently nearby, move crouched for a while after a scare, pause to look around, and wait out a guarded gate.
 
 **Custom offline lobby** lets you mix any number of bot survivors with a human or bot monster.
 

@@ -341,8 +341,8 @@ function makeSonarMaterial({ base, gain, grid, near, color }) {
   });
 }
 const SONAR_MATS = {
-  env: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0.2, color: 0x2bff7a }),
-  gen: makeSonarMaterial({ base: 0.2, gain: 1.0, grid: 1.6, near: 0.2, color: 0xb4ff3b }),   // objectives faintly visible
+  env: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0, color: 0x2bff7a }),
+  gen: makeSonarMaterial({ base: 0.2, gain: 1.0, grid: 1.6, near: 0, color: 0xb4ff3b }),   // objectives faintly visible
 };
 SONAR_MATS.entity = SONAR_MATS.env; // players get no special treatment: same light, same lines
 // A shell around the world, seen only in monster vision, carries the same grid past the
@@ -1436,7 +1436,7 @@ function hostHandle(from, msg) {
     }
     case 'attack': hostAttack(p, msg.ry); break;
     case 'repair': hostRepair(p, msg.gen, msg.dt); break;
-    case 'sonar': if (p?.isMonster) broadcast({ t: 'event', k: 'sonar', by: from, x: p.x, z: p.z }); break;
+    case 'sonar': if (p?.isMonster) { hs.shriek = { x: p.x, z: p.z, t: time }; broadcast({ t: 'event', k: 'sonar', by: from, x: p.x, z: p.z }); } break;
     case 'escape': {
       if (!p || p.isMonster || p.s !== 'alive' || !hs.gateOpen) return;
       if (!inExit(p.x, p.z)) return;
@@ -1543,13 +1543,15 @@ function hostUpdate(dt) {
 function hostBackToLobby() { hs.phase = 'lobby'; broadcastLobby(); }
 
 // ---------------- BOTS (simulated on the host) ----------------
-// Survivor bots sneak to generators, repair them, flee from the monster and run for
-// the exit. The monster bot hunts by sound only: it hears survivors within a radius
-// set by their noise level, investigates, and shrieks (sonar) when it loses the trail.
+// Both bots play by the same rules as people. Survivor bots only know what they've
+// seen or heard of the monster, and they survive by staying silent: freezing, creeping
+// away crouched, and sprinting only when it is on top of them. The monster bot is blind
+// and hunts by sound: it stalks slowly, stops to listen, charges only at fresh, close
+// sounds, and shrieks when it loses the trail.
 function newBrain(p) {
   return p.isMonster
-    ? { path: [], goalKey: '', repathT: 0, mode: 'patrol', target: null, preyId: null, hearT: 0, sonarCD: 10, attackCD: 0, wait: 1, stuckT: 0, lx: p.x, lz: p.z }
-    : { path: [], goalKey: '', repathT: 0, state: 'work', t: 0, alert: 0, refreeze: 0, wait: Math.random() * 1.5, stamina: 1, stuckT: 0, lx: p.x, lz: p.z };
+    ? { path: [], goalKey: '', repathT: 0, mode: 'patrol', lead: null, hearT: 0, sonarCD: 12, attackCD: 0, wait: 1, listenT: 0, nextListen: 4, sweep: 0, stuckT: 0, lx: p.x, lz: p.z }
+    : { path: [], goalKey: '', repathT: 0, state: 'work', t: 0, mem: null, lastScare: -99, wait: Math.random() * 1.5, lookT: 6 + Math.random() * 6, stamina: 1, stuckT: 0, lx: p.x, lz: p.z };
 }
 function botPathTo(p, b, tile, allowExit = false) {
   const key = tile.x + ',' + tile.z;
@@ -1581,86 +1583,127 @@ function botStep(p, b, speed, r, dt, direct = null) {
 }
 function updateBot(p, dt) { if (p.isMonster) updateMonsterBot(p, dt); else updateSurvivorBot(p, dt); }
 
-// Pick a reachable tile far from the monster, weighted against long detours.
-function botPathAway(p, b, mon) {
+// A reachable spot away from a threat: far from it, not a long detour, and preferably
+// sideways rather than straight back (so a charging monster overshoots).
+function botPathAway(p, b, from, minDist = 14) {
   let best = null, bestScore = -Infinity;
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < 24; i++) {
     const t = randomFloorTile(), c = tileCenter(t.x, t.z);
-    const score = Math.hypot(c.x - mon.x, c.z - mon.z) - Math.hypot(c.x - p.x, c.z - p.z) * 0.35;
+    const dFrom = Math.hypot(c.x - from.x, c.z - from.z), dMe = Math.hypot(c.x - p.x, c.z - p.z);
+    if (dMe > 30) continue;
+    const ax = p.x - from.x, az = p.z - from.z, al = Math.hypot(ax, az) || 1;
+    const side = Math.abs(((c.x - p.x) * az - (c.z - p.z) * ax) / al) / (dMe || 1); // 1 = perpendicular
+    const score = Math.min(dFrom, minDist + 6) - dMe * 0.3 + side * 4;
     if (score > bestScore) { bestScore = score; best = t; }
   }
-  b.goalKey = ''; botPathTo(p, b, best);
+  b.goalKey = ''; if (best) botPathTo(p, b, best);
 }
+function survivorEscapes(p) { p.s = 'escaped'; broadcast({ t: 'event', k: 'escaped', id: p.id, name: p.name }); }
+
 function updateSurvivorBot(p, dt) {
   const b = p.bot;
   p.r = 0;
   const mon = Object.values(hs.players).find((q) => q.isMonster && q.s === 'alive');
   const dm = mon ? Math.hypot(mon.x - p.x, mon.z - p.z) : Infinity;
-  // Survivors spot a moving monster at 14 m; a still (camouflaged) one only within 4.5 m.
-  const seen = mon && (dm < 4.5 || (mon.spd > 0.6 && dm < 14));
-  b.refreeze -= dt; b.alert = seen ? 10 : b.alert - dt;
-  const faceMonster = () => { p.ry = angleDamp(p.ry, Math.atan2(-(mon.x - p.x), -(mon.z - p.z)), 6, dt); };
+  // ---- Perception (no cheating: only what this survivor could see or hear)
+  const sees = mon && (dm < 4 || (mon.spd > 0.6 && dm < 14));
+  const hearsSteps = mon && mon.spd > 4 && dm < 22;                  // a charge is loud
+  const hearsShriek = hs.shriek && time - hs.shriek.t < 0.3 && Math.hypot(hs.shriek.x - p.x, hs.shriek.z - p.z) < 60;
+  if (sees || hearsSteps) {
+    const prevD = b.mem ? Math.hypot(b.mem.x - p.x, b.mem.z - p.z) : dm;
+    b.mem = { x: mon.x, z: mon.z, t: time, closing: dm < prevD - 0.02 && mon.spd > 0.6, d: dm };
+  } else if (hearsShriek) b.mem = { x: hs.shriek.x, z: hs.shriek.z, t: time, closing: false, d: Math.hypot(hs.shriek.x - p.x, hs.shriek.z - p.z) };
+  const fresh = b.mem && time - b.mem.t < 1.5;
+  const recent = b.mem && time - b.mem.t < 12;
+  const memD = b.mem ? Math.hypot(b.mem.x - p.x, b.mem.z - p.z) : Infinity;
+  if (fresh && memD < 16) b.lastScare = time;
+  const scared = time - b.lastScare < 15;              // move crouched for a while after a scare
+  const face = (x, z) => { p.ry = angleDamp(p.ry, Math.atan2(-(x - p.x), -(z - p.z)), 6, dt); };
 
-  // Panic only when it is right on top of them or they've just been hit.
-  if (mon && b.state !== 'flee' && (dm < 2.6 || time - p.lastHit < 0.3)) {
-    b.state = 'flee'; b.t = 2.5 + Math.random(); botPathAway(p, b, mon);
+  // ---- Emergencies. It's blind, so a monster that is merely close usually doesn't know
+  // we're here: creep away silently. Only sprint when it is charging right at us or has
+  // just hit us, and only briefly (sprinting is what gives us away).
+  const charging = sees && mon.spd > 4.5 && b.mem?.closing && dm < 4;
+  const justHit = time - p.lastHit < 0.3;
+  if (b.state !== 'evade' && mon && (justHit || (charging && time > (b.quietUntil || 0)))) {
+    b.state = 'evade'; b.t = 1.1 + Math.random() * 0.6; botPathAway(p, b, mon, 10);
+    b.quietUntil = time + b.t + 5; // after one burst, commit to silence: the sprint is what it's chasing
+  } else if (b.state !== 'evade' && b.state !== 'sneak' && sees && dm < 3) {
+    b.state = 'sneak'; botPathAway(p, b, mon, 12);
   }
-  if (b.state === 'flee') {
+  if (b.state === 'evade') {
     b.t -= dt;
     const sprint = b.stamina > 0.05;
     b.stamina = clamp(b.stamina - (sprint ? dt / 4 : -dt * 0.15), 0, 1);
-    const mode = sprint ? 'sprint' : 'walk';
-    p.n = CFG.NOISE[mode]; p.c = 0;
-    if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) || b.t <= 0) { b.state = 'sneak'; if (mon) botPathAway(p, b, mon); }
+    p.c = 0; p.n = sprint ? CFG.NOISE.sprint : CFG.NOISE.walk;
+    // Then drop to a crouch and keep creeping away (the monster lost the trail when we went quiet).
+    if (botStep(p, b, sprint ? CFG.SPEED.sprint : CFG.SPEED.walk, CFG.SURV_R, dt) || b.t <= 0) { b.state = 'sneak'; if (!b.path.length) botPathAway(p, b, mon || p, 12); }
     return;
   }
-  if (b.state === 'work' && seen && b.refreeze <= 0) { b.state = 'freeze'; b.t = 1.2 + Math.random() * 1.8; b.refreeze = 4; }
+  b.stamina = clamp(b.stamina + dt * 0.12, 0, 1);
+
+  // ---- Spotted or heard it nearby: freeze (silent), watch, then decide
+  if ((b.state === 'work' || b.state === 'lurk') && fresh && memD < 18) { b.state = 'freeze'; b.t = 2 + Math.random() * 2; b.frozeAt = time; }
   if (b.state === 'freeze') {
-    // Freeze: drop into a crouch and hold perfectly still (silent) while watching it.
-    p.n = 0; p.c = 1; if (mon) faceMonster();
+    p.n = 0; p.c = 1; p.r = 0;
+    if (b.mem) face(b.mem.x, b.mem.z);
     b.t -= dt;
-    if (b.t <= 0) { b.state = 'sneak'; if (mon) botPathAway(p, b, mon); }
+    // It's coming straight for us and getting close: creep away sideways instead.
+    if (fresh && b.mem.closing && memD < 7) { b.state = 'sneak'; botPathAway(p, b, b.mem, 16); return; }
+    // Stay frozen while it's close and coming nearer; once it's gone quiet, moved off, or
+    // simply isn't heading our way, slip away rather than waiting forever.
+    const longFreeze = time - (b.frozeAt || time) > 6;
+    if (b.t <= 0 && (!fresh || memD > 12 || !b.mem.closing || longFreeze)) { b.state = 'sneak'; botPathAway(p, b, b.mem || p, 16); }
     return;
   }
   if (b.state === 'sneak') {
-    // Creep away in a crouch. Freeze again if it comes closer while moving.
-    p.c = 1; p.n = CFG.NOISE.crouch;
-    if (mon && seen && mon.spd > 0.6 && dm < 7 && b.refreeze <= 0) { b.state = 'freeze'; b.t = 1 + Math.random(); b.refreeze = 4; return; }
-    if (botStep(p, b, CFG.SPEED.crouch, CFG.SURV_R, dt) || dm > 18) {
-      if (dm > 14 || !mon) b.state = 'work'; else if (mon) botPathAway(p, b, mon);
-    }
+    p.c = 1; p.n = CFG.NOISE.crouch; // inaudible beyond ~3.6 m
+    if (fresh && b.mem.closing && memD < 5 && !b.path.length) botPathAway(p, b, b.mem, 16);
+    if (botStep(p, b, CFG.SPEED.crouch, CFG.SURV_R, dt)) { b.state = 'work'; b.wait = 1 + Math.random() * 2; }
     return;
   }
-  b.stamina = clamp(b.stamina + dt * 0.2, 0, 1);
-  if (b.wait > 0) { b.wait -= dt; p.n = 0; return; }
 
-  // Stay crouched for a while after a sighting, otherwise walk.
-  const mode = b.alert > 0 ? 'crouch' : 'walk';
+  // ---- Normal play
+  if (b.wait > 0) { b.wait -= dt; p.n = 0; p.c = scared ? 1 : 0; return; }
+  // Every so often, stop and look around instead of plodding on.
+  b.lookT -= dt;
+  if (b.lookT <= 0) { b.lookT = 7 + Math.random() * 8; b.wait = 1 + Math.random() * 1.5; return; }
+  const mode = scared ? 'crouch' : 'walk';
   p.c = mode === 'crouch' ? 1 : 0;
 
   if (hs.gateOpen) {
-    botPathTo(p, b, tileOf(GATE.x, EXIT_ZONE.minZ + 4), true);
-    p.n = CFG.NOISE[mode];
-    botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt);
-    if (inExit(p.x, p.z)) {
-      p.s = 'escaped';
-      broadcast({ t: 'event', k: 'escaped', id: p.id, name: p.name });
+    // If it was recently near the gate, hang back silently out of earshot and let the
+    // clock run (survivors win at dawn) instead of walking into it.
+    const guarded = recent && Math.hypot(b.mem.x - GATE.x, b.mem.z - GATE.z) < 16 && time - b.mem.t < 8;
+    if (guarded && Math.hypot(p.x - GATE.x, p.z - GATE.z) < 26) {
+      p.n = 0; p.c = 1; face(b.mem.x, b.mem.z);
+      if (memD < 8 && !b.path.length) { b.state = 'sneak'; botPathAway(p, b, b.mem, 16); }
+      return;
     }
+    botPathTo(p, b, tileOf(GATE.x, EXIT_ZONE.minZ + 4), true);
+    // Only break into a run for the very last stretch, and only if it's right behind.
+    const dash = fresh && memD < 6 && Math.hypot(p.x - GATE.x, p.z - GATE.z) < 15 && b.stamina > 0.1;
+    p.n = dash ? CFG.NOISE.sprint : CFG.NOISE[mode];
+    botStep(p, b, dash ? CFG.SPEED.sprint : CFG.SPEED[mode], CFG.SURV_R, dt);
+    if (inExit(p.x, p.z)) survivorEscapes(p);
     return;
   }
-  // Nearest unfinished generator, preferring ones no other bot is already working on
+  // Pick a generator: nearest, avoiding ones other bots are on and where the monster was last seen.
   let gi = -1, gd = Infinity, best = Infinity;
   const taken = new Set(Object.values(hs.players).filter((q) => q !== p && q.bot && !q.isMonster && q.s === 'alive').map((q) => q.bot.gen));
   hs.gens.forEach((g, i) => {
     if (g.done) return;
     const c = genPos(i), d = Math.hypot(c.x - p.x, c.z - p.z);
-    const score = d + (taken.has(i) ? 40 : 0);
+    const danger = recent ? Math.max(0, 20 - Math.hypot(c.x - b.mem.x, c.z - b.mem.z)) * 2 : 0;
+    const score = d + (taken.has(i) ? 40 : 0) + danger;
     if (score < best) { best = score; gd = d; gi = i; }
   });
   b.gen = gi;
   if (gi < 0) { p.n = 0; return; }
   if (gd < 2.3) {
-    // Repair at 60% of a human's speed so a hunting monster has time to interrupt.
+    // Repairing hums (heard ~13 m away): don't do it while the monster was recently close.
+    if (recent && memD < 16) { b.state = 'lurk'; p.n = 0; p.c = 1; if (b.mem) face(b.mem.x, b.mem.z); return; }
+    b.state = 'work';
     p.r = 1; p.c = 0; p.n = CFG.NOISE.repair;
     const c = genPos(gi);
     p.ry = Math.atan2(-(c.x - p.x), -(c.z - p.z));
@@ -1670,84 +1713,108 @@ function updateSurvivorBot(p, dt) {
   botPathTo(p, b, genApproach(gi));
   if (!b.path.length && gd > 2.3) { b.wait = 1 + Math.random(); b.goalKey = ''; p.n = 0; return; }
   p.n = CFG.NOISE[mode];
-  if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) && gd >= 2.3) {
-    // Arrived next to the generator tile: shuffle in close.
-    const c = genPos(gi);
-    botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt, c);
-  }
+  if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) && gd >= 2.3) botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt, genPos(gi));
 }
 
+const MON_SPEED = { prowl: 2.4, stalk: 3.2, charge: 5.7 };
 function updateMonsterBot(p, dt) {
   const b = p.bot;
   b.attackCD -= dt; b.sonarCD -= dt; b.hearT -= dt;
   p.n = 0; p.c = 0; p.r = 0;
   const prey = Object.values(hs.players).filter((q) => !q.isMonster && q.s === 'alive');
 
-  // Hearing: each survivor is audible within (noise × 24 m), plus a 2 m "touch" radius.
+  // ---- Hearing: a survivor is audible within (noise x 24 m), plus touch range (1.6 m).
   if (b.hearT <= 0) {
     b.hearT = 0.2;
     let best = null, bestScore = -Infinity;
     for (const s of prey) {
-      const d = Math.hypot(s.x - p.x, s.z - p.z);
-      const radius = Math.max(2, s.n * 24);
+      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * 24);
       if (d > radius) continue;
-      const score = radius - d;
-      if (score > bestScore) { bestScore = score; best = s; }
+      if (radius - d > bestScore) { bestScore = radius - d; best = s; }
     }
     if (best) {
-      const d = Math.hypot(best.x - p.x, best.z - p.z);
-      const jitter = d * 0.08; // far sounds are vaguer
-      b.target = { x: best.x + (Math.random() - 0.5) * jitter, z: best.z + (Math.random() - 0.5) * jitter };
-      b.preyId = best.id;
-      b.mode = d < 9 ? 'chase' : 'investigate';
-      b.wait = 0;
+      const d = Math.hypot(best.x - p.x, best.z - p.z), jitter = d * 0.1; // far sounds are vaguer
+      b.lead = { x: best.x + (Math.random() - 0.5) * jitter, z: best.z + (Math.random() - 0.5) * jitter, t: time };
+      if (b.mode === 'patrol' || b.mode === 'search' || b.mode === 'listen') { b.mode = 'stalk'; b.goalKey = ''; }
+      b.listenT = 0;
     }
   }
 
-  // Strike anything within reach that is roughly in front.
+  // ---- Strike anything within reach
   for (const s of prey) {
     const d = Math.hypot(s.x - p.x, s.z - p.z);
     if (d < 1.9 && b.attackCD <= 0) {
       const ry = Math.atan2(-(s.x - p.x), -(s.z - p.z));
       p.ry = ry; b.attackCD = CFG.ATTACK_CD + 0.3;
       hostAttack(p, ry);
-      if (s.s !== 'alive' || s.hp <= 0) { b.mode = 'patrol'; b.target = null; }
+      if (s.s !== 'alive' || s.hp <= 0) { b.mode = 'patrol'; b.listenT = 2.5; b.lead = null; b.path = []; }
       break;
     }
   }
 
-  if (b.mode === 'chase' && b.target) {
-    const d = Math.hypot(b.target.x - p.x, b.target.z - p.z);
-    const sameArea = d < 5;
-    if (!sameArea) botPathTo(p, b, tileOf(b.target.x, b.target.z));
-    if (botStep(p, b, 5.3, CFG.MON_R, dt, sameArea ? b.target : null)) b.mode = 'search';
+  // ---- Listening pause: stand still (it fades from sight) and wait for a sound
+  if (b.listenT > 0) {
+    b.listenT -= dt;
+    if (b.listenT <= 0 && b.mode === 'search') shriekOrSweep(p, b, prey);
     return;
   }
-  if (b.mode === 'investigate' && b.target) {
-    botPathTo(p, b, tileOf(b.target.x, b.target.z));
-    if (botStep(p, b, 4.4, CFG.MON_R, dt)) b.mode = 'search';
-    return;
-  }
-  if (b.mode === 'search') {
-    // Lost the trail: shriek to reveal nearby survivors, or give up and patrol.
-    if (b.sonarCD <= 0) {
-      b.sonarCD = 14;
-      broadcast({ t: 'event', k: 'sonar', by: p.id, x: p.x, z: p.z });
-      let near = null, nd = 26;
-      for (const s of prey) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < nd) { nd = d; near = s; } }
-      if (near) { b.target = { x: near.x, z: near.z }; b.preyId = near.id; b.mode = 'investigate'; b.goalKey = ''; return; }
+
+  if (b.mode === 'stalk' && b.lead) {
+    const age = time - b.lead.t, d = Math.hypot(b.lead.x - p.x, b.lead.z - p.z);
+    // Charge only at a fresh sound that's close; otherwise creep in.
+    const charge = age < 1.2 && d < 9;
+    const speed = charge ? MON_SPEED.charge : MON_SPEED.stalk;
+    if (!charge) {
+      b.nextListen -= dt;
+      if (b.nextListen <= 0) { b.nextListen = 3 + Math.random() * 3; b.listenT = 1 + Math.random() * 0.8; return; }
     }
-    b.mode = 'patrol'; b.wait = 1 + Math.random() * 1.5; b.path = []; b.goalKey = '';
+    if (d < 4.5) { if (botStep(p, b, speed, CFG.MON_R, dt, b.lead)) arriveAtLead(b); return; }
+    botPathTo(p, b, tileOf(b.lead.x, b.lead.z));
+    if (botStep(p, b, speed, CFG.MON_R, dt)) arriveAtLead(b);
     return;
   }
-  // Patrol: drift between generators (where survivors must go) and random rooms.
+  if (b.mode === 'sweep' && b.lead) {
+    // Check a few spots around where it last heard something.
+    if (!b.path.length) {
+      if (b.sweep-- <= 0) { b.mode = 'patrol'; b.lead = null; return; }
+      const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 6;
+      b.goalKey = ''; botPathTo(p, b, tileOf(b.lead.x + Math.cos(a) * r, b.lead.z + Math.sin(a) * r));
+      if (!b.path.length) return;
+    }
+    if (botStep(p, b, MON_SPEED.prowl, CFG.MON_R, dt)) { b.listenT = 1.5 + Math.random(); b.path = []; }
+    return;
+  }
+
+  // ---- Patrol: prowl between generators (prioritising ones mid-repair) or guard the gate
   if (b.wait > 0) { b.wait -= dt; return; }
+  b.nextListen -= dt;
+  if (b.nextListen <= 0) { b.nextListen = 6 + Math.random() * 6; b.listenT = 2 + Math.random() * 2; return; }
   if (!b.path.length) {
-    const t = Math.random() < 0.6 ? genApproach(Math.floor(Math.random() * GENS.length)) : randomFloorTile();
+    let t;
+    if (hs.gateOpen && Math.random() < 0.7) t = tileOf(GATE.x + (Math.random() - 0.5) * 16, AREA - FENCE - 4 - Math.random() * 14);
+    else {
+      const active = hs.gens.map((g, i) => [g, i]).filter(([g]) => !g.done && g.progress > 0.05);
+      if (active.length && Math.random() < 0.65) t = genApproach(active[Math.floor(Math.random() * active.length)][1]);
+      else t = Math.random() < 0.5 ? genApproach(Math.floor(Math.random() * GENS.length)) : randomFloorTile();
+    }
     b.goalKey = ''; botPathTo(p, b, t);
     if (!b.path.length) { b.wait = 0.5; return; }
   }
-  if (botStep(p, b, 3.4, CFG.MON_R, dt)) b.wait = 0.5 + Math.random() * 2;
+  if (botStep(p, b, MON_SPEED.prowl, CFG.MON_R, dt)) b.wait = 0.5 + Math.random() * 1.5;
+}
+function arriveAtLead(b) { b.mode = 'search'; b.listenT = 2 + Math.random(); b.path = []; }
+// Lost the trail: shriek if it can (every survivor within 26 m answers by being located),
+// otherwise sweep the area around the last sound.
+function shriekOrSweep(p, b, prey) {
+  if (b.sonarCD <= 0) {
+    b.sonarCD = 14;
+    hs.shriek = { x: p.x, z: p.z, t: time };
+    broadcast({ t: 'event', k: 'sonar', by: p.id, x: p.x, z: p.z });
+    let near = null, nd = 26;
+    for (const s of prey) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < nd) { nd = d; near = s; } }
+    if (near) { b.lead = { x: near.x, z: near.z, t: time - 1.5 }; b.mode = 'stalk'; b.goalKey = ''; return; } // stalk, don't charge
+  }
+  b.mode = 'sweep'; b.sweep = 2 + Math.floor(Math.random() * 2); b.path = [];
 }
 
 // ---------------- CLIENT HANDLING ----------------
@@ -2173,7 +2240,7 @@ function updateLocal(dt) {
       me.stepT = me.isMonster ? 2.6 : 2.0;
       if (me.isMonster) {
         // The monster's own steps send a faint ripple — enough to feel nearby walls.
-        addRipple(_v.set(me.pos.x, 0.05, me.pos.z), me.sprint ? 7 : 5, 0.35, 8);
+        addRipple(_v.set(me.pos.x, 0.05, me.pos.z), me.sprint ? 6 : 4.5, 0.2, 8);
         sfx.heavyStep(0.25, 0);
       } else sfx.step(me.noise, 0);
     }
@@ -2537,4 +2604,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, hostUpdate, hostAttack, DEBUG, KILL, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
