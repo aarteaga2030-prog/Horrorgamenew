@@ -35,6 +35,14 @@ The game is published to **GitHub Pages** by `.github/workflows/pages.yml` on ev
 
 **Looking around:** click the game to lock the mouse cursor. If the browser won't allow pointer lock, or on a touch screen, drag across the screen to look instead. Touch is only for looking; movement and actions always come from the keyboard.
 
+### Balance
+Survivors can outplay a human monster:
+- **Speed:** the monster walks slower than a survivor (3.9 vs 3.4 walk, but survivors sprint at 6.0 against its 5.6 charge). Its charge lasts 2.5 s against a survivor's 5 s sprint, and its stamina recovers more slowly.
+- **Hearing range:** the monster only hears noise in range, the same rule as the bot. Sprinting carries ~24 m, walking ~12 m, crouching ~3.6 m. Noise beyond that never appears on its screen.
+- **Strike:** reach 2.3 m and a 1.6 s cooldown. After a hit, the survivor gets a 3 s speed boost and 2.5 s of invulnerability.
+- **Shriek:** reaches 24 m, on a 20 s cooldown.
+- **Camouflage:** builds only after 1.2 s of stillness, never goes fully invisible (a faint shimmer remains), and a survivor's flashlight beam on it within 14 m breaks it.
+
 ### The map
 A fenced, 120 m square of night forest:
 - **Trees and obstacles:** pines and dead trees, rocks and fallen logs (all solid), plus bushes you can hide behind.
@@ -106,6 +114,7 @@ Connections use Google's public STUN servers to find each player's address, plus
 Notes:
 - **Survivor file:** as uploaded, it is truncated (its ambient-occlusion texture runs past the end of the file), so the reference to that texture was removed.
 - **Survivor material:** it uses the spec-gloss material extension, which three.js no longer reads, so the game re-applies its diffuse texture in code.
+- **The monster player's own body:** when you play the monster you see your creature in first person, in the same sonar style. Look down to see it; its arms swing as you walk, a claw rakes up across the screen when you strike, and it convulses when you shriek.
 - **Monster animation:** the model's own clips, driven by a controller in `game.js`.
   - **Locomotion:** idle, walk and fast walk blend by speed. Playback is stride-matched to how fast it's actually moving, so its feet don't skate.
   - **One-shots:**

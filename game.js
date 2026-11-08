@@ -20,12 +20,14 @@ const CFG = {
   GEN_TIME: 14,           // seconds of solo repair per generator
   SURV_R: 0.35,
   MON_R: 0.45,
-  SPEED: { crouch: 1.8, walk: 3.4, sprint: 6.0, monster: 4.6, monsterSprint: 6.4 },
+  SPEED: { crouch: 1.8, walk: 3.4, sprint: 6.0, monster: 3.9, monsterSprint: 5.6 },
   NOISE: { crouch: 0.15, walk: 0.5, sprint: 1.0, repair: 0.55 },
-  ATTACK_RANGE: 2.6,
-  ATTACK_CD: 1.2,
-  SONAR_CD: 10,
-  HIT_INVULN: 1.5,
+  ATTACK_RANGE: 2.3,
+  ATTACK_CD: 1.6,
+  SONAR_CD: 20,
+  SONAR_RANGE: 24,
+  HEARING: 24,            // metres a full-volume noise carries (the monster hears noise x this)
+  HIT_INVULN: 2.5,
   MAX_HP: 2,
   MAX_RIPPLES: 48,
   NET_HZ: 20,
@@ -1052,7 +1054,9 @@ async function prepSurvivorAsset(gltf) {
   return { template, walk, idle };
 }
 // ---- The monster: Zoonomaly Monster 2 (rigged, with its own animation clips) ---------
-const MONSTER_H = 3.0;  // overall height in metres (its head sits at ~2.4 m)
+const MONSTER_H = 3.0;     // bind-pose height used for the first normalisation pass
+const MONSTER_HEAD = 2.7;  // final height of its head when standing in its idle animation
+const MONSTER_EYE = 2.55;  // the monster player's eye height
 // Clip names in the file are prefixed "<armature>|"; map them to the roles the game needs.
 const MONSTER_CLIPS = { idle: 'idle', walk: 'walk', run: 'walkfast', attack1: 'Attack 1', attack2: 'Attack 2', attack3: 'Attack 3', hit: 'Hit', jumpscare: 'Jumpscare' };
 function prepMonsterAsset(gltf) {
@@ -1067,7 +1071,16 @@ function prepMonsterAsset(gltf) {
     if (c) clips[role] = c;
   }
   if (!clips.idle || !clips.walk) throw new Error('monster.glb is missing its idle/walk clips');
-  return { template: normalizeModel(gltf.scene, MONSTER_H, Math.PI), clips };
+  // Its bind pose is crouched but its animations stand it upright, so size it by where its
+  // head ends up in the idle animation rather than by the bind-pose bounding box.
+  const template = normalizeModel(gltf.scene, MONSTER_H, Math.PI);
+  const mixer = new THREE.AnimationMixer(gltf.scene);
+  mixer.clipAction(clips.idle).play(); mixer.update(0);
+  template.updateMatrixWorld(true);
+  let head = null; gltf.scene.traverse((o) => { if (o.isBone && /^head_011/.test(o.name)) head = o; });
+  if (head) template.scale.multiplyScalar(MONSTER_HEAD / Math.max(0.5, head.getWorldPosition(new THREE.Vector3()).y));
+  mixer.stopAllAction(); mixer.uncacheRoot(gltf.scene);
+  return { template, clips };
 }
 // Per-avatar controller: idle / walk / fast-walk blended by speed, with stride-matched
 // playback rates; attacks, the jumpscare (kills) and the hit (a startle/convulsion) play
@@ -1700,7 +1713,7 @@ function updateSurvivorBot(p, dt) {
   if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) && gd >= 2.3) botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt, genPos(gi));
 }
 
-const MON_SPEED = { prowl: 2.4, stalk: 3.2, charge: 5.7 };
+const MON_SPEED = { prowl: 2.4, stalk: 3.0, charge: 5.4 };
 function updateMonsterBot(p, dt) {
   const b = p.bot;
   b.attackCD -= dt; b.sonarCD -= dt; b.hearT -= dt;
@@ -1712,7 +1725,7 @@ function updateMonsterBot(p, dt) {
     b.hearT = 0.2;
     let best = null, bestScore = -Infinity;
     for (const s of prey) {
-      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * 24);
+      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * CFG.HEARING);
       if (d > radius) continue;
       if (radius - d > bestScore) { bestScore = radius - d; best = s; }
     }
@@ -1794,7 +1807,7 @@ function shriekOrSweep(p, b, prey) {
     b.sonarCD = 14;
     hs.shriek = { x: p.x, z: p.z, t: time };
     broadcast({ t: 'event', k: 'sonar', by: p.id, x: p.x, z: p.z });
-    let near = null, nd = 26;
+    let near = null, nd = CFG.SONAR_RANGE;
     for (const s of prey) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < nd) { nd = d; near = s; } }
     if (near) { b.lead = { x: near.x, z: near.z, t: time - 1.5 }; b.mode = 'stalk'; b.goalKey = ''; return; } // stalk, don't charge
   }
@@ -1857,7 +1870,7 @@ function onStart(msg) {
       me.hp = CFG.MAX_HP; me.status = 'alive'; me.stamina = 1; me.exhausted = false; me.attackCD = 0; me.sonarCD = 2;
       me.escapeSent = false; me.boost = 0; me.damage = 0; me.repairGen = -1; me.colorIdx = p.colorIdx;
       me.killCam = null; me.roll = 0; me.flinch = 0; me.camo = 0; me.stillT = 0;
-      me.eye = me.isMonster ? 2.3 : 1.6;
+      me.eye = me.isMonster ? MONSTER_EYE : 1.6;
     } else addRemote(p);
   }
   setViewMode(me.isMonster ? 'monster' : 'survivor');
@@ -1960,14 +1973,14 @@ function onEvent(e) {
         victim.targetYaw = victim.yaw = Math.atan2(dx, dz); // forward (-Z) points back at the attacker
       }
       if (e.id === me.id) {
-        me.damage = 1; me.boost = 2.5; sfx.hit();
+        me.damage = 1; me.boost = 3; sfx.hit();
         if (lethal) startKillCam(e.by); else { me.flinch = 1; addFeed('You are wounded! RUN.', 'bad'); }
       } else {
         const r = players.get(e.id);
         if (r) { if (lethal) { r.status = 'caught'; r.anim.deadDelay = m ? KILL.raise + 0.05 : 0.01; } else r.anim.flinch = 1; }
         if (me.isMonster) {
           sfx.hit(); addFeed(lethal ? `You took ${e.name}.` : `You wounded ${e.name}.`, 'good');
-          if (lethal) { me.lunge = 1.6; monsterPost.pass.uniforms.uPulse.value = 1.4; }
+          if (lethal) { me.lunge = 1.6; monsterPost.pass.uniforms.uPulse.value = 1.4; viewBody.anim?.play('jumpscare'); }
         } else { addFeed(lethal ? `${e.name} was taken.` : `${e.name} was wounded.`, 'bad'); noise({ dur: 0.4, vol: 0.25 * distVol(pos, 40), pan: panOf(pos), freq: 600 }); }
       }
       break;
@@ -1975,7 +1988,7 @@ function onEvent(e) {
     case 'sonar': {
       const sm = players.get(e.by)?.avatar.userData.monster;
       if (sm && sm.anim.shot !== 'jumpscare') sm.anim.play('hit', { len: 2.4, rate: 1.15 }); // convulsing shriek
-      if (e.by !== me.id) { addRipple(pos.setY(1.5), 30, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); }
+      if (e.by !== me.id) { addRipple(pos.setY(1.5), CFG.SONAR_RANGE, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); }
       break;
     }
     case 'gen': {
@@ -2108,6 +2121,7 @@ canvas.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === dr
 function monsterAttack() {
   if (!me.isMonster || me.status !== 'alive' || me.attackCD > 0) return;
   me.attackCD = CFG.ATTACK_CD; me.lunge = 1;
+  viewBody.anim?.play('attack');
   sfx.swipe();
   // a short forward lunge
   moveWithCollision(me.pos, -Math.sin(me.yaw) * 0.6, -Math.cos(me.yaw) * 0.6, CFG.MON_R);
@@ -2116,7 +2130,8 @@ function monsterAttack() {
 function monsterSonar() {
   if (!me.isMonster || me.status !== 'alive' || me.sonarCD > 0) return;
   me.sonarCD = CFG.SONAR_CD;
-  addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), 30, 1.3, 14);
+  addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), CFG.SONAR_RANGE, 1.3, 14);
+  viewBody.anim?.play('hit', { len: 2.4, rate: 1.15 });
   monsterPost.pass.uniforms.uPulse.value = 1;
   sfx.ping();
   sendToHost({ t: 'sonar' });
@@ -2157,7 +2172,7 @@ function updateKillCam(dt) {
     me.yaw = angleDamp(me.yaw, Math.atan2(-(m.pos.x - me.pos.x), -(m.pos.z - me.pos.z)), 8, dt);
     const fall = ease((K.t - KILL.slam) / 0.6);
     me.eye = lerp(1.6, 0.25, fall); me.roll = 1.2 * fall;
-    me.pitch = damp(me.pitch, K.t < KILL.slam ? Math.atan2(MONSTER_H - 0.6 - me.eye, d) : 0.5, 4, dt);
+    me.pitch = damp(me.pitch, K.t < KILL.slam ? Math.atan2(MONSTER_HEAD - me.eye, d) : 0.5, 4, dt);
     camera.position.set(me.pos.x + (Math.random() - 0.5) * shake, me.eye, me.pos.z);
     camera.rotation.set(me.pitch, me.yaw, me.roll);
   }
@@ -2227,7 +2242,7 @@ function updateLocal(dt) {
   if (me.stamina <= 0) me.exhausted = true;
   if (me.exhausted && me.stamina > 0.35) me.exhausted = false;
   me.sprint = wantSprint && !me.exhausted;
-  me.stamina = clamp(me.stamina + (me.sprint ? -dt / (me.isMonster ? 3 : 4) : dt * (moving ? 0.15 : 0.25)), 0, 1);
+  me.stamina = clamp(me.stamina + (me.sprint ? -dt / (me.isMonster ? 2.5 : 5) : dt * (me.isMonster ? (moving ? 0.1 : 0.18) : (moving ? 0.15 : 0.25))), 0, 1);
 
   let speed;
   if (me.isMonster) speed = me.sprint ? CFG.SPEED.monsterSprint : CFG.SPEED.monster;
@@ -2237,9 +2252,11 @@ function updateLocal(dt) {
   if (wading) speed *= me.isMonster ? 0.8 : 0.6;
   if (moving) moveWithCollision(me.pos, mx * speed * dt, mz * speed * dt, me.isMonster ? CFG.MON_R : CFG.SURV_R);
   me.moving = moving;
+  me.speedNow = damp(me.speedNow || 0, Math.hypot(me.pos.x - (me.lastX ?? me.pos.x), me.pos.z - (me.lastZ ?? me.pos.z)) / Math.max(dt, 1e-4), 10, dt);
+  me.lastX = me.pos.x; me.lastZ = me.pos.z;
   if (me.isMonster) {
     me.stillT = moving || me.attackCD > CFG.ATTACK_CD - 0.5 ? 0 : (me.stillT || 0) + dt;
-    me.camo = me.stillT > 0.6 ? Math.min(1, (me.camo || 0) + dt / 1.4) : Math.max(0, (me.camo || 0) - dt / 0.25);
+    me.camo = me.stillT > 1.2 ? Math.min(1, (me.camo || 0) + dt / 1.4) : Math.max(0, (me.camo || 0) - dt / 0.25);
   }
 
   // ---- Noise (what the monster "sees")
@@ -2265,7 +2282,7 @@ function updateLocal(dt) {
     me.escapeSent = true; sendToHost({ t: 'escape' });
   }
 
-  const targetEye = me.isMonster ? 2.3 : me.crouch ? 1.0 : 1.6;
+  const targetEye = me.isMonster ? MONSTER_EYE : me.crouch ? 1.0 : 1.6;
   me.eye = damp(me.eye, targetEye, 10, dt);
   me.bob += moving ? dt * speed * 2.2 : 0;
   applyCamera(dt, moving ? (me.isMonster ? 0.06 : 0.04) * (speed / 3.4) : 0);
@@ -2357,7 +2374,7 @@ function liveLayer(g, M, dt) {
     rotateBoneWorld(B.head, UP, yaw * 0.6);
     // tilt the head down/up toward the watcher: axis is the avatar's sideways direction
     const side = _lAx.set(Math.cos(g.rotation.y), 0, -Math.sin(g.rotation.y));
-    rotateBoneWorld(B.head, side, clamp(Math.atan2(_lv.y - 2.3, Math.max(dist, 0.5)), -0.6, 0.5) * M.look);
+    rotateBoneWorld(B.head, side, clamp(Math.atan2(_lv.y - MONSTER_HEAD, Math.max(dist, 0.5)), -0.6, 0.5) * M.look);
   }
   // Spasms
   if (time > M.nextSpasm) {
@@ -2378,6 +2395,15 @@ function liveLayer(g, M, dt) {
   rotateBoneWorld(B.handR, UP, Math.sin(time * 29 + 1) * 0.06 + Math.sin(time * 19.1) * 0.04);
 }
 
+const _fl = new THREE.Vector3();
+function inFlashlight(pos, range) {
+  if (viewMode !== 'survivor' || !flashlightOn || me.isMonster || me.status !== 'alive') return false;
+  _fl.set(pos.x, 1.4, pos.z).sub(camera.position);
+  const d = _fl.length(); if (d > range) return false;
+  camera.getWorldDirection(_v2);
+  return _fl.dot(_v2) / d > Math.cos(0.45);
+}
+const _v2 = new THREE.Vector3();
 function animateMonster(r, dt) {
   const a = r.avatar, rig = a.userData.rig, M = a.userData.monster;
   if (!M) { // primitive fallback: simple lurch
@@ -2407,14 +2433,83 @@ function animateMonster(r, dt) {
     else if (Math.random() < dt * (r.speed > 0.5 ? 0.5 : 0.25)) M.freeze = 0.06 + Math.random() * 0.16;
   }
   // ---- Animation + camouflage
-  M.stillT = r.speed < 0.3 && !busy ? M.stillT + dt : 0;
-  const still = M.stillT > 0.6 ? 1 : 0;
-  M.anim.update(adt, r.speed);
+  M.stillT = r.speed < 0.3 && !busy && Math.abs(turnRate) < 0.6 ? M.stillT + dt : 0;
+  // Turning on the spot: shuffle its feet instead of rotating like a statue.
+  const gait = r.speed < 0.5 ? Math.max(r.speed, Math.min(1.6, Math.abs(turnRate) * 0.9)) : r.speed;
+  M.anim.update(adt, gait);
   liveLayer(a, M, dt);
-  M.camo = still ? Math.min(1, M.camo + dt / 1.2) : Math.max(0, M.camo - dt / 0.25);
-  const op = 1 - M.camo; // fully invisible once camouflaged
+  // Listening crouch: when it has been still a while it sinks low and hunches forward.
+  M.crouch = damp(M.crouch || 0, M.stillT > 0.8 ? 1 : 0, 2.2, dt);
+  if (M.crouch > 0.01) {
+    const side = _lAx.set(Math.cos(a.rotation.y), 0, -Math.sin(a.rotation.y));
+    rotateBoneWorld(M.bones.spine, side, -0.45 * M.crouch);
+    rotateBoneWorld(M.bones.head, side, 0.35 * M.crouch);          // keep the face level, peering ahead
+    rotateBoneWorld(M.bones.head, UP, Math.sin(time * 0.6) * 0.5 * M.crouch);
+  }
+  rig.position.y = -0.35 * M.crouch;
+  // Camouflage builds after 1.2 s of stillness, but a survivor's flashlight beam on it
+  // (within 14 m) breaks it, and it never fades completely: a faint shimmer remains.
+  const lit = inFlashlight(r.pos, 14);
+  M.camo = M.stillT > 1.2 && !lit ? Math.min(1, M.camo + dt / 1.4) : Math.max(0, M.camo - dt / (lit ? 0.6 : 0.25));
+  const op = 1 - 0.9 * M.camo;
   for (const m of M.mats) m.opacity = op;
   for (const o of M.meshes) o.castShadow = M.camo < 0.3;
+}
+
+// ---- First-person body for the monster player ---------------------------------------
+// The player sees its own creature: a clone of the model drawn in the sonar style, set at
+// the camera with the head and neck collapsed out of the way. It animates from the
+// player's real movement, so the arms swing as you walk, your claws rake into view when
+// you strike, and you convulse when you shriek.
+const viewBody = { group: null, model: null, anim: null, hide: [], neck: new THREE.Vector3() };
+function setupViewBody() {
+  if (!ASSETS.monster || viewBody.group) return;
+  const model = SkeletonUtils.clone(ASSETS.monster.template);
+  const mat = makeSonarMaterial({ base: 0.09, gain: 1.0, grid: 1.6, near: 0, color: 0x7dffc0 });
+  model.traverse((o) => {
+    if (o.isMesh) { o.material = mat; o.frustumCulled = false; o.castShadow = false; }
+    if (o.isBone && /^(head_011|neck2_010|head_end)/.test(o.name)) viewBody.hide.push(o);
+    if (o.isBone && /^neck1_09/.test(o.name)) viewBody.neckBone = o;
+    if (o.isBone && /^arm_L_06/.test(o.name)) viewBody.armL = o;
+    if (o.isBone && /^arm_R_013/.test(o.name)) viewBody.armR = o;
+  });
+  const group = new THREE.Group(); group.add(model); group.visible = false; scene.add(group);
+  const anim = makeMonsterAnimator(model);
+  anim.update(0, 0); group.updateMatrixWorld(true);
+  viewBody.neckBone?.getWorldPosition(viewBody.neck); // shoulders in body space, standing idle
+  Object.assign(viewBody, { group, model, anim });
+}
+function updateViewBody(dt) {
+  const vb = viewBody;
+  if (!vb.group) return;
+  const show = me.isMonster && game.phase === 'playing' && me.status === 'alive' && viewMode === 'monster';
+  vb.group.visible = show;
+  if (!show) return;
+  vb.anim.update(dt, me.speedNow || 0);
+  for (const b of vb.hide) b.scale.setScalar(0.001);
+  // First-person claw rake: on a strike, swing one arm up into view and across.
+  const A = vb.anim, rake = A.shot && /^attack|jumpscare/.test(A.shot) ? A.shotT / A.shotLen : -1;
+  if (rake >= 0) {
+    if (A.shotT < 0.02) vb.side = vb.side === vb.armL ? vb.armR : vb.armL;
+    const k = Math.sin(Math.min(1, rake * 1.6) * Math.PI);          // up and back down
+    vb.group.updateMatrixWorld(true);
+    const right = _lAx.set(Math.cos(me.yaw), 0, -Math.sin(me.yaw));
+    const fwd = _v2.set(-Math.sin(me.yaw), 0, -Math.cos(me.yaw));
+    const arm = A.shot === 'jumpscare' ? null : (vb.side || vb.armR);
+    for (const b of arm ? [arm] : [vb.armL, vb.armR]) {
+      rotateBoneWorld(b, right, 1.9 * k);                              // lift forward into view
+      rotateBoneWorld(b, fwd, (b === vb.armL ? 1 : -1) * (rake - 0.3) * 1.4 * k); // sweep across
+    }
+  }
+  // Put the shoulders a little in front of and below the eyes, so the arms hang in view.
+  const sin = Math.sin(me.yaw), cos = Math.cos(me.yaw);
+  const nx = vb.neck.x, nz = vb.neck.z, ahead = 0.3;
+  vb.group.rotation.y = me.yaw;
+  vb.group.position.set(
+    me.pos.x - (nx * cos + nz * sin) - sin * ahead,
+    me.eye - 0.35 - vb.neck.y,
+    me.pos.z - (-nx * sin + nz * cos) - cos * ahead,
+  );
 }
 
 function updateRemotes(dt) {
@@ -2441,7 +2536,8 @@ function updateRemotes(dt) {
       }
     } else if (me.isMonster || viewMode === 'monster') {
       // ===== ECHOLOCATION: survivor noise → sonar ripples on the monster's grid
-      if (r.noise > 0.01) {
+      const inEarshot = !me.isMonster || r.pos.distanceTo(me.pos) < Math.max(1.6, r.noise * CFG.HEARING);
+      if (r.noise > 0.01 && inEarshot) {
         r.stepT -= dt;
         if (r.stepT <= 0) {
           const n = r.noise;
@@ -2636,6 +2732,7 @@ if (inviteCode && !EMBEDDED) $('#code-input').value = inviteCode.toUpperCase();
 loadAssets((f) => menuStatus(`Loading models… ${Math.round(f * 100)}%`)).finally(() => {
   menuStatus(ASSETS.survivor && ASSETS.monster ? '' : 'Some models failed to load; using simple stand-ins.', !(ASSETS.survivor && ASSETS.monster));
   buildBridges(mulberry32(77));
+  setupViewBody();
   for (const id of ['#btn-bot-survivor', '#btn-bot-monster', '#btn-host', '#btn-offline', '#btn-join']) $(id).disabled = false;
   if (inviteCode && !EMBEDDED) {
     history.replaceState(null, '', location.pathname + location.search); // don't rejoin on refresh
@@ -2653,6 +2750,7 @@ function animate() {
   if (game.phase === 'playing' || game.phase === 'ended') {
     if (game.phase === 'playing') updateLocal(dt);
     const { monsterDist } = updateRemotes(dt);
+    updateViewBody(dt);
     updateWorld(dt, monsterDist);
     if (net.isHost) hostUpdate(dt);
     if (game.phase === 'playing') { sendState(dt); updateHUD(); }
@@ -2667,4 +2765,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, viewBody, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
