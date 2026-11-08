@@ -13,6 +13,17 @@ python3 -m http.server 8000
 
 > The page has to be served over `http(s)://`. Opening `index.html` as a `file://` URL won't work, because ES modules and WebRTC don't run there.
 
+## Playing online with friends
+The game is published to **GitHub Pages** by `.github/workflows/pages.yml` on every push to `main`: https://aarteaga2030-prog.github.io/Horrorgamenew/
+
+**One-time setup:** in the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. Then merge to `main` (or run the workflow by hand from the Actions tab).
+
+**To play:**
+1. One player opens the site and clicks **Host room**.
+2. They click **Copy invite link** and send it to friends.
+3. Opening the link joins the room automatically, with no code to type. The 5-character Room ID still works with **Join** too.
+4. The host picks the monster (or **Random monster**), can fill empty seats with **Add bot survivor** / **Add bot monster**, and clicks **Start game**.
+
 ## How to play
 
 | | Survivors | Monster |
@@ -78,7 +89,7 @@ By default, PeerJS uses its free public cloud server. To use your own [PeerServe
 ?peerHost=my.server.com&peerPort=9000&peerPath=/&peerSecure=1
 ```
 
-Peer-to-peer connections need STUN to get through NAT. Some strict networks also need a TURN server, which you'd have to add to `peerOptions()`.
+Connections use Google's public STUN servers to find each player's address, plus the free Open Relay TURN service (`ICE_SERVERS` in `game.js`) to relay traffic for players behind strict NATs, such as many mobile networks. For a busy deployment, swap in your own TURN server there.
 
 ## Assets
 | File | What it is |

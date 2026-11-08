@@ -49,12 +49,16 @@
             <button id="btn-join" disabled>Join</button>
           </div>
         </div>
-        <p id="embed-note" class="muted hidden">Online rooms need WebRTC, which this embedded page can't use. Open the game's index.html from a web server to host or join a room.</p>
+        <p id="embed-note" class="muted hidden">This playtest page can't connect to other players. To host or join a room with friends, play the <a id="online-link" href="#" target="_blank" rel="noopener">online version</a>.</p>
         <p id="menu-status" class="status">Loading models…</p>
       </div>
 
       <div id="menu-lobby" class="hidden">
         <div class="room-code">Room ID <span id="room-code">-----</span> <button id="btn-copy" class="small">Copy</button></div>
+        <div id="invite-row" class="invite hidden">
+          <span class="muted">Send friends this link. Opening it joins your room.</span>
+          <div class="row"><code id="invite-link"></code><button id="btn-invite" class="small primary">Copy invite link</button></div>
+        </div>
         <ul id="player-list"></ul>
         <div id="host-controls" class="hidden">
           <div class="row">

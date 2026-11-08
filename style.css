@@ -50,6 +50,10 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--green); out
 
 .room-code { text-align: center; margin-bottom: 14px; color: var(--muted); }
 #room-code { color: var(--green); font-size: 26px; letter-spacing: 0.35em; margin: 0 8px; }
+.invite { margin: -4px 0 14px; display: flex; flex-direction: column; gap: 6px; }
+.invite .row { margin: 0; align-items: center; }
+#invite-link { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: 12px; color: var(--muted); background: #0b110e; border: 1px solid var(--line); padding: 6px 8px; }
+#embed-note a { color: var(--green); }
 #player-list { list-style: none; padding: 0; margin: 0 0 14px; border: 1px solid var(--line); }
 #player-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 #player-list li:last-child { border-bottom: none; }

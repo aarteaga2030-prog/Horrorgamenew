@@ -245,7 +245,7 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 400);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
-const survivorFog = new THREE.FogExp2(0x101722, 0.024);
+const survivorFog = new THREE.FogExp2(0x04060a, 0.045);
 const clock = new THREE.Clock();
 let time = 0;
 
@@ -383,7 +383,7 @@ function setViewMode(mode) {
   for (const o of survivorOnly) o.visible = !mon;
   monsterSky.visible = mon;
   scene.fog = mon ? null : survivorFog;
-  scene.background = new THREE.Color(mon ? 0x000000 : 0x101722);
+  scene.background = new THREE.Color(mon ? 0x000000 : 0x04060a);
   flashlight.visible = !mon && flashlightOn;
 }
 
@@ -825,9 +825,9 @@ function buildWorld() {
   moon.position.set(AREA / 2 - 90, 110, AREA / 2 - 120); scene.add(moon); survivorOnly.push(moon);
 
   // Moonlight + sky/ground ambient
-  const moonLight = new THREE.DirectionalLight(0xa9bde0, 1.6); moonLight.position.set(-60, 100, -80); moonLight.target.position.set(AREA / 2, 0, AREA / 2);
+  const moonLight = new THREE.DirectionalLight(0x8fa3c8, 0.32); moonLight.position.set(-60, 100, -80); moonLight.target.position.set(AREA / 2, 0, AREA / 2);
   scene.add(moonLight, moonLight.target); survivorOnly.push(moonLight);
-  scene.add(new THREE.HemisphereLight(0x6a7ea6, 0x2a2216, 2.4));
+  scene.add(new THREE.HemisphereLight(0x3a4866, 0x0e0b07, 0.55));
 
   buildNav();
   for (let z = 0; z < NAV_H; z++) for (let x = 0; x < NAV_W; x++) if (navBlocked[navIdx(x, z)] === 0 && z < (AREA - FENCE) * NAV_RES) NAV_FREE.push({ x, z });
@@ -1333,9 +1333,19 @@ let lobbyPlayers = [];
 const net = { peer: null, isHost: false, offline: false, hostConn: null, conns: new Map(), code: null };
 
 // Optional self-hosted signaling server: ?peerHost=example.com&peerPort=9000&peerPath=/&peerSecure=0
+// Where the game is hosted for online play (GitHub Pages; see .github/workflows/pages.yml).
+const ONLINE_URL = 'https://aarteaga2030-prog.github.io/Horrorgamenew/';
+// STUN finds each player's public address; the TURN relay carries traffic for players
+// behind strict NATs (mobile networks, some routers) who can't connect directly.
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+];
 function peerOptions() {
   const q = new URLSearchParams(location.search);
-  const o = { debug: 1 };
+  const o = { debug: 1, config: { iceServers: ICE_SERVERS } };
   if (q.get('peerHost')) {
     o.host = q.get('peerHost');
     o.port = +(q.get('peerPort') || 443);
@@ -1837,6 +1847,8 @@ function onLobby(msg) {
   $('#menu-main').classList.add('hidden');
   $('#menu-lobby').classList.remove('hidden');
   $('#room-code').textContent = msg.code;
+  $('#invite-row').classList.toggle('hidden', !net.isHost || net.offline);
+  if (net.isHost && !net.offline) $('#invite-link').textContent = inviteLink();
   $('#host-controls').classList.toggle('hidden', !net.isHost);
   $('#btn-lobby-menu').classList.toggle('hidden', !net.offline);
   $('#lobby-status').textContent = net.isHost ? (net.offline ? 'Offline practice: add bots, pick a role, start.' : 'Share the Room ID. Click a player to make them the monster.') : 'Waiting for host to start…';
@@ -2517,7 +2529,15 @@ $('#btn-host').onclick = () => { initAudio(); readName(); hostCreate(false); };
 $('#btn-offline').onclick = () => { quickRole = null; initAudio(); readName(); hostCreate(true); };
 $('#btn-join').onclick = () => { initAudio(); readName(); joinRoom($('#code-input').value); };
 $('#code-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-join').click(); });
-$('#btn-copy').onclick = () => navigator.clipboard?.writeText(net.code);
+// Invite link: opening it fills in the room and joins straight away.
+const inviteLink = () => location.origin + location.pathname + location.search + '#join=' + net.code;
+function copyText(text, btn) {
+  const done = () => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = t; }, 1500); };
+  const fallback = () => { const i = document.createElement('input'); i.value = text; document.body.appendChild(i); i.select(); try { document.execCommand('copy'); done(); } catch (e) { /* select-only fallback */ } i.remove(); };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+}
+$('#btn-copy').onclick = () => copyText(net.code, $('#btn-copy'));
+$('#btn-invite').onclick = () => copyText(inviteLink(), $('#btn-invite'));
 $('#btn-start').onclick = () => { initAudio(); hostStart(); };
 $('#btn-random-monster').onclick = () => { const humans = Object.values(hs.players).filter((p) => !p.isBot); setMonster(humans[Math.floor(Math.random() * humans.length)].id); };
 let botN = 1;
@@ -2574,10 +2594,16 @@ setViewMode('monster');
 
 // Embedded pages (the Claude artifact build) can't use WebRTC, so hide online play there.
 const EMBEDDED = !!window.BLINDSIGHT_EMBED;
-if (EMBEDDED) { $('#online-group').classList.add('hidden'); $('#embed-note').classList.remove('hidden'); }
+if (EMBEDDED) { $('#online-group').classList.add('hidden'); $('#embed-note').classList.remove('hidden'); $('#online-link').href = ONLINE_URL; }
+const inviteCode = (location.hash.match(/join=([A-Za-z0-9]{4,6})/) || [])[1];
+if (inviteCode && !EMBEDDED) $('#code-input').value = inviteCode.toUpperCase();
 loadAssets((f) => menuStatus(`Loading models… ${Math.round(f * 100)}%`)).finally(() => {
   menuStatus(ASSETS.survivor && ASSETS.monster ? '' : 'Some models failed to load; using simple stand-ins.', !(ASSETS.survivor && ASSETS.monster));
   for (const id of ['#btn-bot-survivor', '#btn-bot-monster', '#btn-host', '#btn-offline', '#btn-join']) $(id).disabled = false;
+  if (inviteCode && !EMBEDDED) {
+    history.replaceState(null, '', location.pathname + location.search); // don't rejoin on refresh
+    readName(); joinRoom(inviteCode);
+  }
 });
 
 const DEBUG = { dtScale: 1 }; // set to 0 from the console to freeze the simulation
