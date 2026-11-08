@@ -39,7 +39,11 @@ The game is published to **GitHub Pages** by `.github/workflows/pages.yml` on ev
 A fenced, 120 m square of night forest:
 - **Trees and obstacles:** pines and dead trees, rocks and fallen logs (all solid), plus bushes you can hide behind.
 - **Buildings:** a two-room main cabin, a hunting cabin and a shed. Each holds one generator and has lit windows.
-- **Camp:** the survivors start around a campfire. Dirt paths link it to the buildings and the exit gate.
+- **Camp:** the survivors start around a campfire. Dirt paths link it to the buildings and the exit gate, and a trail links the two cabins.
+- **The creek:** it winds across the whole forest under low drifting mist.
+  - **Wading:** slow (60% speed, 80% for the monster) and loud: splashing counts as noise even when crouched.
+  - **Bridges:** broken plank bridges carry the paths over it. They're the quiet way across, though their boards creak a little.
+  - **Bots** always use the bridges.
 - **Exit:** the gate is in the south fence. Once all three generators run, it slides open and the road beyond it is the way out.
 
 **Camouflage:**
@@ -95,26 +99,27 @@ Connections use Google's public STUN servers to find each player's address, plus
 | File | What it is |
 |---|---|
 | `assets/survivor.glb` | [Survivor [Toon-Style]](https://sketchfab.com/3d-models/survivor-toon-style-5aa13349079141d0927b8ea96e1349c4) by lalit (CC BY 4.0). Skinned, with one "Walk + Idle" clip that the game splits into a walk loop and an idle loop. |
-| `assets/monster.glb` | Rigged, game-ready version of [Wendigo](https://sketchfab.com/3d-models/wendigo-inspired-by-until-dawn-d46093a707a24444af1ed7d10aa7198f) by marc3_C (CC BY 4.0), built by `tools/optimize-monster.mjs`: 23 MB → 2.9 MB, scaled to 7 ft (2.13 m), with a 23-bone skeleton and skin weights, and textures at 1024 px WebP. |
-| `assets/source/wendigo-original.glb` | The original wendigo upload, kept as the source for the optimizer. |
+| `assets/monster.glb` | [Zoonomaly Monster 2 Rig](https://sketchfab.com/NO.DONT.EAT.ME.CASEOH) by NO DONT EAT ME CASEOH (CC BY 4.0): rigged (31 bones) with idle, walk, fast-walk, three attacks, hit and jumpscare clips. Textures resized to 1024 px WebP; geometry, rig and animation untouched. |
+| `assets/bridge1.glb`, `assets/bridge2.glb` | Forest wooden path-bridge tiles (broken 1 and 2) by [Frice](https://sketchfab.com/Frice) (**CC BY-NC 4.0: non-commercial use only**). Textures resized to 1024 px WebP. |
+| `assets/source/` | The original uploads: the monster, the bridge tiles, and the old wendigo (no longer used). `tools/optimize-models.sh` rebuilds `assets/` from them. |
 
 Notes:
 - **Survivor file:** as uploaded, it is truncated (its ambient-occlusion texture runs past the end of the file), so the reference to that texture was removed.
 - **Survivor material:** it uses the spec-gloss material extension, which three.js no longer reads, so the game re-applies its diffuse texture in code.
-- **Monster rig:** the source wendigo had no skeleton, so the optimizer auto-rigs it.
-  - It measures joint positions by slicing the T-posed mesh: the legs separate below the crotch, the arms are thinnest at the elbow and wrist, and the claws fan out past the hand.
-  - It builds a 23-bone humanoid skeleton: hips, spine, chest, neck, head, and clavicles, upper arms, forearms, hands, claws, thighs, shins, feet and toes on each side.
-  - It skins every vertex to up to four bones, with smooth blends across each joint.
-- **Monster animation:** `game.js` builds the clips at runtime from pose functions.
-  - **Locomotion:**
-    - **Idle:** ragged breathing, a stalling and snapping head scan, fingers flexing.
-    - **Walk:** a limping, lurching stride, arms swinging late and loose, head held eerily level.
-    - **Run:** an all-fours gallop.
-    - **Stalk:** a folded, owl-like listening crouch with claws tapping.
-    - Motion is layered from uneven harmonics of each loop, so it reads as organic while still looping seamlessly.
-  - **One-shots:** claw swipes (coil, strike, overshoot), the kill (rear up, slam, bite and wrench the head) and the shriek (convulsions). They play on top of locomotion, triggered by attack, kill and sonar events, so everyone sees the same thing.
-  - **Live layer:** on top of the clips, its head turns to track a nearby survivor, random spasms jerk the head, neck and claws, and the claws never stop trembling.
-  - **Kill choreography:** the monster and victim turn to face each other, and the victim is drawn into reach. The slam lands on them and they fall away from the monster.
+- **Monster animation:** the model's own clips, driven by a controller in `game.js`.
+  - **Locomotion:** idle, walk and fast walk blend by speed. Playback is stride-matched to how fast it's actually moving, so its feet don't skate.
+  - **One-shots:**
+    - Attacks pick one of the three attack clips at random.
+    - Kills play the **Jumpscare**: it leaps in, drives the victim down, and crouches over them face to face.
+    - The sonar shriek plays the start of **Hit** as a convulsion.
+    - A generator roaring to life or the gate opening nearby makes it flinch (a short Hit).
+  - **Dynamic layer**, on top of the clips:
+    - It banks into turns and pitches with acceleration.
+    - It moves with stop-motion stutters: random micro-freezes, then a lurch to catch up.
+    - Its idle speed drifts, so the loop never repeats exactly.
+    - Its head turns in world space to track a survivor watching it from within 16 m.
+    - Random spasms jerk its head, neck, forearms and hands, and its fingers tremble.
+  - **Kill choreography:** the monster and victim turn to face each other, and the victim is drawn into reach. The victim's kill cam rides the model's own jumpscare **camera bone**, staring into its face (kept at least 1.1 m away), and the match result waits for it to finish.
 - **Survivor animation:** the walk/idle clips are blended by speed. Crouch, sprint lean, repairing, hit flinch and the death fall are layered on top as procedural bone rotations.
 
 ## Playtest build (Claude artifact)
@@ -131,4 +136,4 @@ The artifact host serves only web file types, so the build wraps each `.glb` as 
 - `style.css`: the UI styling.
 - `game.js`: everything else, including the map, rendering, shaders, model loading, networking, gameplay, audio and bot AI.
 - `play.html`: the generated artifact build (see above).
-- `tools/`: `build-play.py` (artifact build) and `optimize-monster.mjs` (model pipeline).
+- `tools/`: `build-play.py` (artifact build) and `optimize-models.sh` (texture compression for the models).

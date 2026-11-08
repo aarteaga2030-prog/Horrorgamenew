@@ -20,11 +20,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - name: Assemble the site (game files only; skip the 23 MB source model)
+      - name: Assemble the site (game files only; skip the source models)
         run: |
           mkdir -p _site/assets
           cp index.html style.css game.js _site/
-          cp assets/survivor.glb assets/monster.glb _site/assets/
+          cp assets/survivor.glb assets/monster.glb assets/bridge1.glb assets/bridge2.glb _site/assets/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

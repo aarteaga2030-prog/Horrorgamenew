@@ -33,7 +33,7 @@ print("wrote play.html")
 import base64, json
 out_dir = root / "build" / "assets"
 out_dir.mkdir(parents=True, exist_ok=True)
-for name in ("survivor.glb", "monster.glb"):
+for name in ("survivor.glb", "monster.glb", "bridge1.glb", "bridge2.glb"):
     data = base64.b64encode((root / "assets" / name).read_bytes()).decode()
     (out_dir / (name + ".json")).write_text(json.dumps({"glb": data}))
     print("wrote build/assets/" + name + ".json")

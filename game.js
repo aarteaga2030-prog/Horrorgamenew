@@ -84,6 +84,7 @@ const PATHS = [
   [[58, 96], [53, 80], [46, 62], [40, 50], [38, 45]],
   [[58, 96], [70, 86], [80, 74], [83.5, 68]],
   [[58, 96], [44, 92], [31, 86]],
+  [[40, 47], [56, 53], [72, 60], [83.5, 68]],   // trail between the two cabins
 ];
 const doorPos = (c) => ({
   south: { x: c.x, z: c.z + c.d / 2 }, north: { x: c.x, z: c.z - c.d / 2 },
@@ -156,6 +157,7 @@ function buildNav() {
     const road = px > EXIT_ZONE.minX && px < EXIT_ZONE.maxX && pz >= AREA - FENCE - 1;
     if (!inside && !road) v = 1;
     if (road && pz > AREA - FENCE + 0.6) v = 3;
+    if (!v && distToPolyline(px, pz, CREEK) < CREEK_W / 2 + 0.3 && !onBridge(px, pz)) v = 1; // bots cross by the bridges
     if (!v) {
       const near = [];
       for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) near.push(...(colHash.get(colKey(Math.floor(px / COL_CELL) + dx, Math.floor(pz / COL_CELL) + dz)) || []));
@@ -564,8 +566,132 @@ function distToSegment(px, pz, ax, az, bx, bz) {
   return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
 }
 function nearPath(x, z, m) { for (const p of PATHS) for (let i = 0; i < p.length - 1; i++) if (distToSegment(x, z, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1]) < m) return true; return false; }
-// Somewhere a tree/rock may not go: cabins, camp, generators, paths, gate and road.
+// ---- Creek and bridges -----------------------------------------------------------
+// A creek winds across the forest from west to east. Wading is slow and loud (a big
+// ripple for the monster); the plank bridges where paths cross it are the quiet way over.
+const CREEK = [[-40, 64], [0, 66], [20, 70], [45, 72], [65, 64], [85, 54], [120, 50], [160, 50]];
+const CREEK_W = 3.6;
+function distToPolyline(x, z, pts) {
+  let best = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) best = Math.min(best, distToSegment(x, z, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]));
+  return best;
+}
+// Bridges sit wherever a path segment crosses the creek, aligned with the path.
+const BRIDGES = [];
+function findBridges() {
+  for (const path of PATHS) for (let i = 0; i < path.length - 1; i++) {
+    const [ax, az] = path[i], [bx, bz] = path[i + 1];
+    for (let j = 0; j < CREEK.length - 1; j++) {
+      const [cx, cz] = CREEK[j], [dx, dz] = CREEK[j + 1];
+      const den = (bx - ax) * (dz - cz) - (bz - az) * (dx - cx);
+      if (Math.abs(den) < 1e-9) continue;
+      const t = ((cx - ax) * (dz - cz) - (cz - az) * (dx - cx)) / den, u = ((cx - ax) * (bz - az) - (cz - az) * (bx - ax)) / den;
+      if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+      const len = Math.hypot(bx - ax, bz - az);
+      BRIDGES.push({ x: ax + (bx - ax) * t, z: az + (bz - az) * t, fx: (bx - ax) / len, fz: (bz - az) / len, half: 4.2, w: 1.0 });
+    }
+  }
+}
+function onBridge(x, z) {
+  for (const b of BRIDGES) {
+    const dx = x - b.x, dz = z - b.z, along = dx * b.fx + dz * b.fz, across = -dx * b.fz + dz * b.fx;
+    if (Math.abs(along) < b.half && Math.abs(across) < b.w) return true;
+  }
+  return false;
+}
+const inWater = (x, z) => distToPolyline(x, z, CREEK) < CREEK_W / 2 && !onBridge(x, z);
+// A flat ribbon following a polyline (for the water and its muddy banks).
+function ribbonGeometry(pts, width, y) {
+  const pos = [], uv = [], idx = [];
+  let along = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+    let tx = b[0] - a[0], tz = b[1] - a[1]; const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
+    if (i) along += Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]);
+    const nx = -tz * width / 2, nz = tx * width / 2;
+    pos.push(p[0] + nx, y, p[1] + nz, p[0] - nx, y, p[1] - nz);
+    uv.push(0, along / width, 1, along / width);
+    if (i) { const k = i * 2; idx.push(k - 2, k, k - 1, k - 1, k, k + 1); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+// Densify a polyline (smooth enough for a ribbon) with a little wobble.
+function densify(pts, step, rng) {
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1], n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    for (let k = 0; k < n; k++) { const t = k / n; out.push([lerp(ax, bx, t) + (k ? (rng() - 0.5) * 0.4 : 0), lerp(az, bz, t) + (k ? (rng() - 0.5) * 0.4 : 0)]); }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+function buildCreek(rng) {
+  const line = densify(CREEK, 2, rng);
+  const bank = new THREE.Mesh(ribbonGeometry(line, CREEK_W + 2.6, 0.012), stdMat({ map: TEX.path, color: 0x6a5a48, polygonOffset: true, polygonOffsetFactor: -1 }));
+  bank.receiveShadow = true; scene.add(reg(bank));
+  const water = new THREE.Mesh(ribbonGeometry(line, CREEK_W, 0.03), new THREE.MeshStandardMaterial({ color: 0x0a161c, roughness: 0.08, metalness: 0.65, polygonOffset: true, polygonOffsetFactor: -3 }));
+  water.receiveShadow = true; scene.add(reg(water));
+  world.water = water;
+  // Stones along the banks (not solid: they're ankle-high)
+  for (let i = 0; i < line.length; i += 2) {
+    if (rng() < 0.35) continue;
+    const [x, z] = line[i], side = rng() < 0.5 ? -1 : 1, a = Math.atan2(line[Math.min(i + 1, line.length - 1)][1] - z, line[Math.min(i + 1, line.length - 1)][0] - x);
+    const off = CREEK_W / 2 + 0.3 + rng() * 0.9, sx = x - Math.sin(a) * off * side, sz = z + Math.cos(a) * off * side;
+    if (onBridge(sx, sz)) continue;
+    const r = 0.15 + rng() * 0.3, geo = new THREE.DodecahedronGeometry(r, 0); geo.scale(1, 0.5, 1); geo.translate(sx, r * 0.2, sz);
+    addToChunk('rock', geo, sx, sz);
+  }
+}
+function buildBridges(rng) {
+  const tiles = [ASSETS.bridge1, ASSETS.bridge2].filter(Boolean);
+  for (const b of BRIDGES) {
+    const yaw = Math.atan2(b.fx, b.fz) - Math.PI / 2; // each tile is a 2 m deck section running along its local X
+    const n = Math.ceil((b.half * 2) / 2.0);
+    for (let k = 0; k < n; k++) {
+      const t = -b.half + (k + 0.5) * (b.half * 2 / n), x = b.x + b.fx * t, z = b.z + b.fz * t;
+      let tile;
+      if (tiles.length) {
+        tile = tiles[Math.floor(rng() * tiles.length)].clone(true);
+      } else { // fallback planks if the tile models didn't load
+        tile = new THREE.Mesh(new THREE.BoxGeometry(2, 0.1, 1.05), stdMat({ map: TEX.planks })); tile.position.y = 0.12;
+      }
+      const holder = new THREE.Group();
+      holder.add(tile);
+      holder.position.set(x, 0.04, z);
+      holder.rotation.y = yaw + (rng() < 0.5 ? Math.PI : 0) + (rng() - 0.5) * 0.05;
+      holder.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+      scene.add(reg(holder));
+    }
+  }
+}
+// Low mist drifting over the creek (survivor view only).
+function buildMist(rng) {
+  const tex = canvasTex(256, (g, s) => {
+    for (let i = 0; i < 18; i++) {
+      const x = s * (0.2 + Math.random() * 0.6), y = s * (0.3 + Math.random() * 0.4), r = s * (0.12 + Math.random() * 0.2);
+      const grd = g.createRadialGradient(x, y, 0, x, y, r); grd.addColorStop(0, 'rgba(70,80,92,0.05)'); grd.addColorStop(1, 'rgba(70,80,92,0)');
+      g.fillStyle = grd; g.fillRect(0, 0, s, s);
+    }
+  });
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, opacity: 0.6, fog: true });
+  world.mist = [];
+  const line = densify(CREEK, 14, rng);
+  for (const [x, z] of line) {
+    if (x < 0 || x > AREA) continue;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(10 + rng() * 6, 10 + rng() * 6), mat);
+    m.rotation.x = -Math.PI / 2; m.position.set(x + (rng() - 0.5) * 3, 0.35 + rng() * 0.4, z + (rng() - 0.5) * 3);
+    scene.add(m); survivorOnly.push(m); world.mist.push({ m, x: m.position.x, phase: rng() * 10 });
+  }
+}
+
+// Somewhere a tree/rock may not go: cabins, camp, generators, paths, gate, road and creek.
 function keepClear(x, z, extra = 0) {
+  if (distToPolyline(x, z, CREEK) < CREEK_W / 2 + 1.6 + extra) return true;
   for (const c of CABINS) if (Math.abs(x - c.x) < c.w / 2 + 3 + extra && Math.abs(z - c.z) < c.d / 2 + 3 + extra) return true;
   if (Math.hypot(x - CAMPFIRE.x, z - CAMPFIRE.z) < 10 + extra) return true;
   if (Math.hypot(x - SPAWN_MON.x, z - SPAWN_MON.z) < 3) return true;
@@ -706,6 +832,9 @@ function buildWorld() {
     seg.position.set((ax + bx) / 2, 0.012 + i * 0.001, (az + bz) / 2); seg.receiveShadow = true;
     scene.add(reg(seg));
   }
+
+  // Creek, bridges and mist
+  findBridges(); buildCreek(rng); buildMist(rng); // bridge planks go in once their models load
 
   // Cabins and generators
   CABINS.forEach(buildCabin);
@@ -922,243 +1051,78 @@ async function prepSurvivorAsset(gltf) {
   }
   return { template, walk, idle };
 }
-const MONSTER_H = 2.13; // 7 ft
+// ---- The monster: Zoonomaly Monster 2 (rigged, with its own animation clips) ---------
+const MONSTER_H = 3.0;  // overall height in metres (its head sits at ~2.4 m)
+// Clip names in the file are prefixed "<armature>|"; map them to the roles the game needs.
+const MONSTER_CLIPS = { idle: 'idle', walk: 'walk', run: 'walkfast', attack1: 'Attack 1', attack2: 'Attack 2', attack3: 'Attack 3', hit: 'Hit', jumpscare: 'Jumpscare' };
 function prepMonsterAsset(gltf) {
-  let hips = null;
   gltf.scene.traverse((o) => {
-    if (o.isBone && o.name === 'Hips') hips = o;
     if (!o.isMesh) return;
     o.castShadow = true; o.frustumCulled = false; // skinned: bounds don't follow the pose
     o.material.side = THREE.FrontSide;
   });
-  if (!hips) throw new Error('monster.glb has no Hips bone (rebuild it with tools/optimize-monster.mjs)');
-  const clips = buildMonsterClips(hips.position.clone());
+  const clips = {};
+  for (const [role, name] of Object.entries(MONSTER_CLIPS)) {
+    const c = gltf.animations.find((a) => a.name.split('|').pop() === name);
+    if (c) clips[role] = c;
+  }
+  if (!clips.idle || !clips.walk) throw new Error('monster.glb is missing its idle/walk clips');
   return { template: normalizeModel(gltf.scene, MONSTER_H, Math.PI), clips };
 }
-// ---- Wendigo animation ------------------------------------------------------------
-// The rig (tools/optimize-monster.mjs) rests in a T-pose with identity bone rotations,
-// +Y up, +Z forward, +X the creature's left. Clips are sampled from pose functions:
-// each returns Euler XYZ angles per bone (radians) plus a Hips offset in metres.
-//   spine/neck/head: +x leans forward, y turns, z tilts
-//   arms: `lower` drops the arm from the T-pose, `fwd` swings it forward/up,
-//         `elbow`/`curl` bend the forearm/claws forward
-//   legs: thigh -x swings forward, knee +x bends, foot +x points the toes down
-// Motion is layered from several harmonics of each clip's length (so loops stay
-// seamless) with irregular phases, which reads as organic rather than mechanical.
-const SIDES = [['L', 1], ['R', -1]];
-const TAU = Math.PI * 2;
-// Loop-safe "noise": a sum of harmonics of period T with fixed, uneven phases.
-function wob(t, T, seed, amp = 1) {
-  const w = (TAU * t) / T;
-  return amp * (Math.sin(w + seed * 1.7) * 0.5 + Math.sin(2 * w + seed * 3.1) * 0.3 + Math.sin(3 * w + seed * 5.3) * 0.2);
-}
-// A sharp twitch at time c (seconds) inside a loop of length T: fast attack, slow release.
-function twitch(t, c, T, amp, attack = 0.05, release = 0.35) {
-  let d = t - c; if (d < -T / 2) d += T; if (d > T / 2) d -= T;
-  if (d < -attack || d > release) return 0;
-  return amp * (d < 0 ? 1 + d / attack : Math.pow(1 - d / release, 2));
-}
-function basePose() {
-  const p = { Hips: [0, 0, 0], Spine: [0.32, 0, 0], Chest: [0.24, 0, 0], Neck: [-0.25, 0, 0], Head: [-0.12, 0, 0], hips: [0, -0.09, 0] };
-  for (const [S] of SIDES) { p['Clavicle' + S] = [0, 0, 0]; p['Toe' + S] = [0, 0, 0]; }
-  setArm(p, 'L', {}); setArm(p, 'R', {}); setLeg(p, 'L', {}); setLeg(p, 'R', {});
-  return p;
-}
-function setArm(p, S, { lower = 1.32, fwd = 0.3, elbow = 0.4, curl = 0.35, twist = 0, shrug = 0 } = {}) {
-  const s = S === 'L' ? 1 : -1;
-  p['Clavicle' + S] = [0, 0, s * shrug];
-  p['UpperArm' + S] = [-fwd, twist * s, -s * lower];
-  p['Forearm' + S] = [0, -s * elbow, 0];
-  p['Hand' + S] = [0, -s * curl * 0.4, 0];
-  p['Claws' + S] = [0, -s * curl, 0];
-}
-function setLeg(p, S, { thigh = -0.28, knee = 0.5, foot = -0.2, splay = 0 } = {}) {
-  const s = S === 'L' ? 1 : -1;
-  p['UpLeg' + S] = [thigh, 0, s * splay];
-  p['Leg' + S] = [knee, 0, 0];
-  p['Foot' + S] = [foot, 0, 0];
-}
-function idlePose(t) {
-  // 6 s loop: ragged breathing, shoulders heaving, a slow head scan that stalls and
-  // snaps, fingers flexing out of step with each other.
-  const T = 6, p = basePose(), br = Math.sin((TAU * t) / T * 3) * 0.5 + 0.5; // three breaths per loop
-  p.Chest[0] += br * 0.06; p.Spine[0] += wob(t, T, 1, 0.03);
-  p.Spine[2] = wob(t, T, 2, 0.05); p.Chest[1] = wob(t, T, 3, 0.06);
-  p.Head[1] = wob(t, T, 4, 0.45) + twitch(t, 2.1, T, 0.5) - twitch(t, 4.4, T, 0.35);
-  p.Head[2] = wob(t, T, 5, 0.2) + twitch(t, 2.15, T, 0.55, 0.04, 0.6);
-  p.Neck[0] += wob(t, T, 6, 0.08) - twitch(t, 3.3, T, 0.3);
-  for (const [S, s] of SIDES) {
-    setArm(p, S, { fwd: 0.3 + wob(t, T, 7 + s, 0.08), elbow: 0.4 + wob(t, T, 9 + s, 0.1), curl: 0.35 + wob(t * 2, T, 11 + s, 0.3) + twitch(t, s > 0 ? 1.2 : 4.9, T, -0.6), shrug: br * 0.08 });
-    setLeg(p, S, { thigh: -0.28 + s * wob(t, T, 13, 0.04), knee: 0.5 + wob(t, T, 14 + s, 0.05) });
-  }
-  p.hips = [wob(t, T, 15, 0.025), -0.09 + br * 0.01, 0];
-  return p;
-}
-function walkPose(t) {
-  // 1.25 s stride with a limp (right leg drags), a lurching torso, arms swinging late
-  // and loose, claws trailing, while the head stays eerily level.
-  const T = 1.25, p = basePose(), ph = (t / T) * TAU;
-  p.Spine[0] = 0.42 + Math.sin(ph * 2) * 0.05; p.Chest[0] = 0.22;
-  p.Spine[1] = Math.sin(ph) * 0.14; p.Chest[1] = -Math.sin(ph - 0.4) * 0.12;
-  p.Spine[2] = Math.sin(ph) * 0.08; p.Chest[2] = -Math.sin(ph + 0.6) * 0.07; // shoulder roll
-  p.Neck[0] = -0.38 - Math.sin(ph * 2) * 0.05; p.Neck[1] = -Math.sin(ph) * 0.12; // counter-rotate: head stays put
-  p.Head[2] = Math.sin(ph + 1) * 0.08 + wob(t, T, 3, 0.04);
-  for (const [S, s] of SIDES) {
-    const q = ph + (s > 0 ? 0 : Math.PI), sw = Math.sin(q), limp = s > 0 ? 1 : 0.65;
-    setLeg(p, S, { thigh: -0.3 - sw * 0.55 * limp, knee: 0.45 + Math.max(0, Math.cos(q)) * 0.85 * limp, foot: -0.15 + sw * 0.3 });
-    const lag = Math.sin(q - 0.7); // arms follow through behind the legs
-    setArm(p, S, { lower: 1.3, fwd: 0.35 + lag * 0.45, elbow: 0.45 + Math.max(0, -lag) * 0.35, curl: 0.4 + Math.max(0, lag) * 0.3, twist: lag * 0.15 });
-  }
-  p.hips = [Math.sin(ph) * 0.03, -0.11 + Math.cos(ph * 2) * 0.045 - (Math.cos(ph) > 0.8 ? 0.02 : 0), 0];
-  return p;
-}
-function gallopPose(t) {
-  // 0.62 s all-fours gallop: torso pitched nearly flat, long arms clawing at the ground
-  // in front, legs driving behind, head craned up to keep looking ahead.
-  const T = 0.62, p = basePose(), ph = (t / T) * TAU;
-  p.Spine[0] = 1.05 + Math.sin(ph) * 0.12; p.Chest[0] = 0.35 + Math.sin(ph + 0.8) * 0.1;
-  p.Neck[0] = -1.05 - Math.sin(ph) * 0.1; p.Head[0] = -0.35; p.Head[2] = Math.sin(ph) * 0.06;
-  p.Spine[1] = Math.sin(ph) * 0.08;
-  for (const [S, s] of SIDES) {
-    const qa = ph + (s > 0 ? 0 : 0.5), qb = ph + Math.PI + (s > 0 ? 0 : 0.5); // arms lead, legs push
-    setArm(p, S, { lower: 1.25, fwd: 1.35 + Math.sin(qa) * 0.55, elbow: 0.25 + Math.max(0, Math.cos(qa)) * 0.6, curl: 0.55 + Math.max(0, -Math.sin(qa)) * 0.4 });
-    setLeg(p, S, { thigh: -0.75 - Math.sin(qb) * 0.65, knee: 1.1 + Math.max(0, Math.cos(qb)) * 0.8, foot: -0.4 + Math.sin(qb) * 0.35, splay: 0.06 });
-  }
-  p.hips = [0, -0.55 + Math.cos(ph) * 0.08, -0.05];
-  return p;
-}
-function stalkPose(t) {
-  // 4 s: folded low, head slowly tipping sideways like an owl listening, weight
-  // rocking, claw tips tapping the ground out of rhythm.
-  const T = 4, p = basePose(), tilt = Math.sin((TAU * t) / T);
-  p.Spine[0] = 0.85 + wob(t, T, 1, 0.05); p.Chest[0] = 0.3; p.Neck[0] = -0.75; p.Head[0] = -0.2;
-  p.Head[2] = tilt * 0.75 + twitch(t, 1.3, T, 0.3, 0.03, 0.2); p.Head[1] = wob(t, T, 2, 0.35);
-  p.Spine[2] = wob(t, T, 3, 0.06);
-  for (const [S, s] of SIDES) {
-    setLeg(p, S, { thigh: -1.1, knee: 1.85, foot: -0.65, splay: 0.14 });
-    const tap = twitch(t, s > 0 ? 0.6 : 2.6, T, 0.5, 0.04, 0.18) + twitch(t, s > 0 ? 3.2 : 1.7, T, 0.4, 0.04, 0.18);
-    setArm(p, S, { lower: 1.18, fwd: 0.9 + wob(t, T, 4 + s, 0.06), elbow: 0.75, curl: 0.5 - tap });
-  }
-  p.hips = [wob(t, T, 6, 0.04), -0.55 + wob(t, T, 7, 0.02), -0.05];
-  return p;
-}
-function swipePose(t, side) {
-  // 0.62 s: coil back (anticipation), rake down and across with the whole body,
-  // overshoot past the target, then settle.
-  const p = walkPose(0), S = side > 0 ? 'L' : 'R', s = side;
-  const coil = smooth01(t / 0.18), strike = smooth01((t - 0.18) / 0.12), settle = smooth01((t - 0.36) / 0.26);
-  const fwd = lerp(lerp(0.35, 2.7, coil), -0.2, strike), lower = lerp(lerp(1.3, 0.6, coil), 1.35, strike);
-  setArm(p, S, { fwd: lerp(fwd, 0.35, settle), lower: lerp(lower, 1.3, settle), elbow: lerp(lerp(0.4, 1.1, coil), 0.05, strike), curl: lerp(lerp(0.4, -0.4, coil), 0.8, strike), shrug: coil * (1 - strike) * 0.3 });
-  p.Chest[1] = s * lerp(lerp(0, 0.5, coil), -0.6, strike) * (1 - settle);
-  p.Spine[0] = lerp(lerp(0.42, 0.25, coil), 0.85, strike) * (1 - settle) + 0.42 * settle;
-  p.Neck[0] = lerp(-0.38, -0.7, strike) * (1 - settle) - 0.38 * settle;   // head lunges with the strike
-  p.hips[2] = lerp(-0.05 * coil, 0.35, strike) * (1 - settle);
-  return p;
-}
-function killPose(t) {
-  // 1.7 s: rear up claws high (0-0.45), drive both claws down into the victim and lunge
-  // (0.45-0.7), bite and wrench the head side to side (0.7-1.25), straighten slowly.
-  const p = basePose();
-  const up = smooth01(t / 0.45), slam = smooth01((t - 0.45) / 0.22), rec = smooth01((t - 1.25) / 0.45);
-  const bite = t > 0.72 && t < 1.25 ? Math.sin((t - 0.72) * 38) * 0.35 * (1 - (t - 0.72) / 0.53) : 0;
-  p.Spine[0] = lerp(lerp(0.32, -0.3, up), 1.0, slam) * (1 - rec) + 0.32 * rec;
-  p.Chest[0] = lerp(lerp(0.24, -0.2, up), 0.35, slam) * (1 - rec) + 0.24 * rec;
-  p.Neck[0] = lerp(lerp(-0.25, -0.85, up), 0.35, slam) * (1 - rec) - 0.25 * rec;
-  p.Head[0] = lerp(-0.12, -0.4, up) * (1 - slam) + 0.15 * slam * (1 - rec);
-  p.Head[1] = bite; p.Neck[1] = bite * 0.6; p.Head[2] = bite * 0.5 + up * (1 - slam) * 0.3;
-  for (const [S, s] of SIDES) {
-    setArm(p, S, {
-      fwd: lerp(lerp(0.3, 2.8, up), 0.55, slam) * (1 - rec) + 0.3 * rec,
-      lower: lerp(lerp(1.32, 0.45, up), 1.05, slam), elbow: lerp(lerp(0.4, 0.7, up), 0.3, slam),
-      curl: lerp(lerp(0.35, -0.5, up), 1.0, slam) + (t > 0.7 && t < 1.25 ? Math.sin(t * 50 + s) * 0.12 : 0), shrug: up * (1 - slam) * 0.35,
-    });
-    setLeg(p, S, { thigh: lerp(-0.28, -1.0, slam) * (1 - rec) - 0.28 * rec, knee: lerp(0.5, 1.35, slam) * (1 - rec) + 0.5 * rec, foot: lerp(-0.2, -0.5, slam) });
-  }
-  p.hips = [0, lerp(lerp(-0.09, 0.08, up), -0.42, slam) * (1 - rec) - 0.09 * rec, lerp(-0.1 * up, 0.55, slam) * (1 - rec)];
-  return p;
-}
-function shriekPose(t) {
-  // 1.3 s: convulse back, jaw-to-sky, arms thrown wide and spasming.
-  const p = basePose(), a = smooth01(t / 0.25) * (1 - smooth01((t - 0.95) / 0.35));
-  const sp = (k) => Math.sin(t * 47 + k) * 0.06 * a + Math.sin(t * 23 + k * 2) * 0.04 * a;
-  p.Spine[0] = lerp(0.32, -0.25, a) + sp(1); p.Chest[0] = lerp(0.24, -0.45, a) + sp(2);
-  p.Neck[0] = lerp(-0.25, -0.9, a) + sp(3); p.Head[0] = lerp(-0.12, -0.4, a); p.Head[2] = sp(4) * 3; p.Head[1] = sp(5) * 2;
-  for (const [S, s] of SIDES) setArm(p, S, { lower: lerp(1.32, 0.25, a), fwd: lerp(0.3, -0.45, a) + sp(6 + s), elbow: lerp(0.4, 0.1, a) + sp(8 + s), curl: lerp(0.35, -0.55, a) + sp(10 + s) * 3, shrug: a * 0.3 });
-  p.hips[1] = -0.09 + a * 0.04;
-  return p;
-}
-function smooth01(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
-// Sample a pose function into an AnimationClip (quaternion tracks + Hips position).
-function poseClip(name, duration, fn, restHips, fps = 30) {
-  const n = Math.max(2, Math.round(duration * fps) + 1), times = [], poses = [];
-  for (let i = 0; i < n; i++) { const t = (i / (n - 1)) * duration; times.push(t); poses.push(fn(t)); }
-  const tracks = [], e = new THREE.Euler(), q = new THREE.Quaternion();
-  for (const bone of Object.keys(poses[0])) {
-    if (bone === 'hips') continue;
-    const vals = [];
-    for (const p of poses) { const a = p[bone]; q.setFromEuler(e.set(a[0], a[1], a[2], 'XYZ')); vals.push(q.x, q.y, q.z, q.w); }
-    tracks.push(new THREE.QuaternionKeyframeTrack(bone + '.quaternion', times, vals));
-  }
-  const hv = [];
-  for (const p of poses) hv.push(restHips.x + p.hips[0], restHips.y + p.hips[1], restHips.z + p.hips[2]);
-  tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, hv));
-  return new THREE.AnimationClip(name, duration, tracks);
-}
-function buildMonsterClips(restHips) {
-  return {
-    idle: poseClip('idle', 6, idlePose, restHips),
-    walk: poseClip('walk', 1.25, walkPose, restHips),
-    run: poseClip('run', 0.62, gallopPose, restHips),
-    stalk: poseClip('stalk', 4, stalkPose, restHips),
-    swipeL: poseClip('swipeL', 0.62, (t) => swipePose(t, 1), restHips),
-    swipeR: poseClip('swipeR', 0.62, (t) => swipePose(t, -1), restHips),
-    kill: poseClip('kill', 1.7, killPose, restHips),
-    shriek: poseClip('shriek', 1.3, shriekPose, restHips),
-  };
-}
-// Per-avatar controller: locomotion loops blended by speed/stillness, one-shots on top.
+// Per-avatar controller: idle / walk / fast-walk blended by speed, with stride-matched
+// playback rates; attacks, the jumpscare (kills) and the hit (a startle/convulsion) play
+// on top as one-shots.
 function makeMonsterAnimator(model) {
   const mixer = new THREE.AnimationMixer(model);
   const C = ASSETS.monster.clips, act = {};
   for (const [k, clip] of Object.entries(C)) {
     const a = mixer.clipAction(clip); act[k] = a;
-    if (['idle', 'walk', 'run', 'stalk'].includes(k)) { a.play(); a.setEffectiveWeight(k === 'idle' ? 1 : 0); }
+    if (['idle', 'walk', 'run'].includes(k)) { a.play(); a.setEffectiveWeight(k === 'idle' ? 1 : 0); a.time = Math.random() * clip.duration; }
     else { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; }
   }
-  const st = { mixer, act, w: { idle: 1, walk: 0, run: 0, stalk: 0 }, shot: null, shotT: 0, shotW: 0, swipeSide: 1 };
-  st.play = (name) => {
-    if (name === 'swipe') { st.swipeSide = -st.swipeSide; name = st.swipeSide > 0 ? 'swipeL' : 'swipeR'; }
+  const st = { mixer, act, clips: C, w: { idle: 1, walk: 0, run: 0 }, shot: null, shotT: 0, shotW: 0, shotLen: 0, rate: 1 };
+  // play('attack') picks one of the three attacks at random; `len` can cut a long clip short.
+  st.play = (name, { len = 0, rate = 1, from = 0 } = {}) => {
+    if (name === 'attack') name = ['attack1', 'attack2', 'attack3'][Math.floor(Math.random() * 3)];
+    if (!act[name]) return;
     if (st.shot && st.shot !== name) act[st.shot].stop();
-    st.shot = name; st.shotT = 0; act[name].reset().play();
+    st.shot = name; st.shotT = 0; st.shotLen = (len || C[name].duration - from) / rate;
+    act[name].reset(); act[name].time = from; act[name].timeScale = rate; act[name].play();
   };
   st.busy = () => !!st.shot;
-  st.update = (dt, speed, still) => {
-    const run = clamp((speed - 4.9) / 1.0, 0, 1), move = clamp(speed / 1.2, 0, 1);
-    const tgt = { run: run * move, walk: (1 - run) * move, stalk: still * (1 - move), idle: (1 - still) * (1 - move) };
-    for (const k in tgt) st.w[k] = damp(st.w[k], tgt[k], 8, dt);
-    act.walk.timeScale = clamp(speed / 3.6, 0.5, 1.6); act.run.timeScale = clamp(speed / 6.0, 0.8, 1.4);
+  st.update = (dt, speed) => {
+    const run = clamp((speed - 4.0) / 1.4, 0, 1), move = clamp(speed / 0.9, 0, 1);
+    const tgt = { run: run * move, walk: (1 - run) * move, idle: 1 - move };
+    for (const k in tgt) st.w[k] = damp(st.w[k], tgt[k], 7, dt);
+    // Stride matching: the clips cover ~2.2 m (walk) and ~4.5 m (fast walk) per second at 1x.
+    act.walk.timeScale = clamp(speed / 2.2, 0.5, 2.0) * st.rate;
+    act.run.timeScale = clamp(speed / 4.5, 0.8, 1.6) * st.rate;
+    act.idle.timeScale = st.rate;
     if (st.shot) {
       st.shotT += dt;
-      const dur = C[st.shot].duration;
-      st.shotW = smooth01(st.shotT / 0.08) * (1 - smooth01((st.shotT - (dur - 0.15)) / 0.15));
-      if (st.shotT >= dur) { act[st.shot].stop(); st.shot = null; st.shotW = 0; }
+      st.shotW = smooth01(st.shotT / 0.1) * (1 - smooth01((st.shotT - (st.shotLen - 0.2)) / 0.2));
+      if (st.shotT >= st.shotLen) { act[st.shot].stop(); st.shot = null; st.shotW = 0; }
     }
-    const loco = 1 - st.shotW, sum = st.w.idle + st.w.walk + st.w.run + st.w.stalk || 1;
-    for (const k of ['idle', 'walk', 'run', 'stalk']) act[k].setEffectiveWeight((st.w[k] / sum) * loco);
+    const loco = 1 - st.shotW, sum = st.w.idle + st.w.walk + st.w.run || 1;
+    for (const k of ['idle', 'walk', 'run']) act[k].setEffectiveWeight((st.w[k] / sum) * loco);
     if (st.shot) act[st.shot].setEffectiveWeight(st.shotW);
     mixer.update(dt);
   };
   return st;
 }
-
+function smooth01(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
 async function loadAssets(onProgress) {
   const prog = { s: 0, m: 0 };
   const report = () => onProgress?.((prog.s + prog.m) / 2);
   const pct = (key) => (e) => { if (e.total) { prog[key] = e.loaded / e.total; report(); } };
-  const [s, m] = await Promise.allSettled([
+  const [s, m, b1, b2] = await Promise.allSettled([
     loadGLB('assets/survivor.glb', pct('s')).then(prepSurvivorAsset),
     loadGLB('assets/monster.glb', pct('m')).then(prepMonsterAsset),
+    loadGLB('assets/bridge1.glb').then((g) => g.scene),
+    loadGLB('assets/bridge2.glb').then((g) => g.scene),
   ]);
+  if (b1.status === 'fulfilled') ASSETS.bridge1 = b1.value;
+  if (b2.status === 'fulfilled') ASSETS.bridge2 = b2.value;
   if (s.status === 'fulfilled') ASSETS.survivor = s.value; else console.warn('Survivor model failed to load, using fallback.', s.reason);
   if (m.status === 'fulfilled') ASSETS.monster = m.value; else console.warn('Monster model failed to load, using fallback.', m.reason);
   ASSETS.loaded = true;
@@ -1219,8 +1183,12 @@ function makeMonsterAvatar() {
     });
     rig.add(model);
     reg(g, 'entity');
-    const bones = {}; model.traverse((o) => { if (o.isBone) bones[o.name] = o; });
-    g.userData.monster = { anim: makeMonsterAnimator(model), mats, meshes, bones, camo: 0, stillT: 0, look: 0, spasms: [], nextSpasm: time + 1 + Math.random() * 3 };
+    const bones = {};
+    model.traverse((o) => { if (!o.isBone) return; for (const [k, re] of Object.entries(MONSTER_BONES)) if (re.test(o.name)) bones[k] = o; });
+    g.userData.monster = {
+      anim: makeMonsterAnimator(model), mats, meshes, bones, camo: 0, stillT: 0, look: 0, spasms: [], nextSpasm: time + 1 + Math.random() * 3,
+      bank: 0, pitch: 0, rateT: 0, rateTarget: 1, freeze: 0, owed: 0,
+    };
     g.userData.rig = rig;
     scene.add(g);
     return g;
@@ -1289,6 +1257,8 @@ const sfx = {
   gen: () => { tone({ f: 110, f2: 220, dur: 1.2, type: 'sawtooth', vol: 0.12 }); tone({ f: 660, dur: 0.3, vol: 0.12, delay: 0.9 }); },
   gate: () => { tone({ f: 60, f2: 90, dur: 2.5, type: 'sawtooth', vol: 0.15 }); noise({ dur: 2.5, vol: 0.12, freq: 200 }); },
   repair: () => noise({ dur: 0.06, vol: 0.06, freq: 2500 + Math.random() * 1500, q: 4 }),
+  splash: (vol) => { noise({ dur: 0.25, vol: 0.18 + vol * 0.2, freq: 900 + Math.random() * 600, q: 0.5 }); noise({ dur: 0.12, vol: 0.1, freq: 3000, q: 1, delay: 0.05 }); },
+  creak: (vol) => { tone({ f: 160 + Math.random() * 60, f2: 110, dur: 0.22, type: 'sawtooth', vol: 0.03 + vol * 0.05 }); noise({ dur: 0.08, vol: vol * 0.2, freq: 500, q: 1 }); },
 };
 function startDrone(mode) {
   if (!audio.ctx) return;
@@ -1523,7 +1493,11 @@ function hostUpdate(dt) {
     const v = Math.hypot(p.x - (p.lx ?? p.x), p.z - (p.lz ?? p.z)) / Math.max(dt, 1e-4);
     p.spd = damp(p.spd || 0, v, 4, dt); p.lx = p.x; p.lz = p.z;
   }
-  for (const p of Object.values(hs.players)) if (p.isBot && p.s === 'alive') updateBot(p, dt);
+  for (const p of Object.values(hs.players)) {
+    if (!p.isBot || p.s !== 'alive') continue;
+    updateBot(p, dt);
+    if (!p.isMonster && p.n > 0 && p.spd > 0.3 && onBridge(p.x, p.z)) p.n = Math.min(1, p.n * 1.3);
+  }
 
   hs.snapAcc += dt;
   if (hs.snapAcc >= 1 / CFG.NET_HZ) {
@@ -1544,7 +1518,7 @@ function hostUpdate(dt) {
   if (surv.length > 0 && alive === 0) end = escaped > 0 ? { w: 'survivors', reason: `${escaped} escaped, ${caught} taken.` } : { w: 'monster', reason: 'Every survivor was taken.' };
   else if (hs.timeLeft <= 0) end = alive + escaped > 0 ? { w: 'survivors', reason: `Dawn broke. ${alive + escaped} survived, ${caught} taken.` } : { w: 'monster', reason: 'Nobody made it.' };
   // Let a final kill animation and kill cam play out before showing the result.
-  if (end && hs.lastKill !== undefined && time - hs.lastKill < 3.2) end = null;
+  if (end && hs.lastKill !== undefined && time - hs.lastKill < KILL.end + 0.8) end = null;
   if (end) {
     hs.phase = 'ended';
     broadcast({ t: 'end', winner: end.w, reason: end.reason, stats: surv.map((p) => ({ name: p.name, s: p.s })) });
@@ -1883,7 +1857,7 @@ function onStart(msg) {
       me.hp = CFG.MAX_HP; me.status = 'alive'; me.stamina = 1; me.exhausted = false; me.attackCD = 0; me.sonarCD = 2;
       me.escapeSent = false; me.boost = 0; me.damage = 0; me.repairGen = -1; me.colorIdx = p.colorIdx;
       me.killCam = null; me.roll = 0; me.flinch = 0; me.camo = 0; me.stillT = 0;
-      me.eye = me.isMonster ? 1.95 : 1.6;
+      me.eye = me.isMonster ? 2.3 : 1.6;
     } else addRemote(p);
   }
   setViewMode(me.isMonster ? 'monster' : 'survivor');
@@ -1935,7 +1909,7 @@ function onSnap(msg) {
     }
     const r = players.get(s.id); if (!r) continue;
     const dying = r.anim && (r.anim.dead >= 0 || r.anim.deadDelay > 0);
-    const killing = r.avatar.userData.monster?.anim.shot === 'kill';
+    const killing = r.avatar.userData.monster?.anim.shot === 'jumpscare';
     if (!dying && !killing) { r.target.set(s.x, 0, s.z); r.targetYaw = s.ry; } r.noise = s.n; r.crouch = s.c; r.repairing = s.r; r.hp = s.hp;
     if (r.status !== s.s) {
       r.status = s.s;
@@ -1951,13 +1925,20 @@ function setMyStatus(s) {
   if (s === 'caught' && !me.killCam) addFeed('You were taken. Spectating. Press V for monster vision.', 'bad');
   if (s === 'escaped') addFeed('You escaped! Spectating — press V for monster vision.', 'good');
 }
+// A sudden loud noise nearby makes the monster flinch (the first part of its Hit clip).
+function startleMonsters(x, z, range) {
+  for (const r of players.values()) {
+    const M = r.isMonster && r.avatar.userData.monster;
+    if (M && !M.anim.busy() && Math.hypot(r.pos.x - x, r.pos.z - z) < range) M.anim.play('hit', { len: 1.3, rate: 1.3 });
+  }
+}
 function onEvent(e) {
   const pos = new THREE.Vector3(e.x || 0, 0.1, e.z || 0);
   switch (e.k) {
     case 'swing': {
       const m = players.get(e.by);
       const M = m?.avatar.userData.monster;
-      if (M && M.anim.act.kill && M.anim.shot !== 'kill') M.anim.play('swipe');
+      if (M && M.anim.shot !== 'jumpscare') M.anim.play('attack');
       if (m && !me.isMonster) noise({ dur: 0.3, vol: 0.3 * distVol(m.pos, 25), pan: panOf(m.pos), freq: 1600, q: 0.8 });
       break;
     }
@@ -1969,7 +1950,7 @@ function onEvent(e) {
       // to claw's reach, so the slam lands on them and they fall away from the monster.
       const attacker = e.by === me.id ? me.pos : m?.pos;
       if (lethal && m) {
-        if (M) M.anim.play('kill');
+        if (M) M.anim.play('jumpscare');
         m.targetYaw = m.yaw = Math.atan2(-(e.x - m.pos.x), -(e.z - m.pos.z));
       }
       const victim = players.get(e.id);
@@ -1993,13 +1974,14 @@ function onEvent(e) {
     }
     case 'sonar': {
       const sm = players.get(e.by)?.avatar.userData.monster;
-      if (sm && sm.anim.shot !== 'kill') sm.anim.play('shriek');
+      if (sm && sm.anim.shot !== 'jumpscare') sm.anim.play('hit', { len: 2.4, rate: 1.15 }); // convulsing shriek
       if (e.by !== me.id) { addRipple(pos.setY(1.5), 30, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); }
       break;
     }
     case 'gen': {
       addRipple(pos.setY(1), 26, 1.4, 11);
       world.gens[e.i].shake = 1;
+      startleMonsters(e.x, e.z, 25);
       game.gens[e.i].done = true; game.gens[e.i].progress = 1;
       sfx.gen();
       addFeed(e.left > 0 ? `A generator roars to life. ${e.left} remaining.` : 'All generators online!', me.isMonster ? 'warn' : 'good');
@@ -2008,6 +1990,7 @@ function onEvent(e) {
     case 'gate': {
       game.gateOpen = true;
       addRipple(pos.setY(1.5), 40, 1.5, 12);
+      startleMonsters(e.x, e.z, 35);
       sfx.gate();
       addFeed(me.isMonster ? 'The exit gate is opening. Guard it.' : 'The EXIT GATE is open! Escape south!', me.isMonster ? 'bad' : 'good');
       break;
@@ -2150,25 +2133,40 @@ function startKillCam(by) {
   me.status = 'caught';
   me.noise = 0; me.repairing = false;
 }
+const _kcPos = new THREE.Vector3(), _kcHead = new THREE.Vector3(), _kcDir = new THREE.Vector3();
 function updateKillCam(dt) {
   const K = me.killCam; K.t += dt;
-  const m = players.get(K.by);
-  if (m) {
-    const head = MONSTER_H - 0.2, d = Math.max(0.5, Math.hypot(m.pos.x - me.pos.x, m.pos.z - me.pos.z));
+  const m = players.get(K.by), B = m?.avatar.userData.monster?.bones;
+  if (K.t >= KILL.raise && !K.slammed) { K.slammed = true; me.damage = 1.4; sfx.hit(); sfx.heavyStep(0.9, 0); }
+  const shake = K.t > KILL.raise && K.t < KILL.slam + 0.4 ? 0.05 : 0.008;
+  if (B?.camera && B.head && K.t < KILL.end) {
+    // Ride the creature's own jumpscare camera, staring into its face as it pins you down.
+    B.camera.updateWorldMatrix(true, false); B.head.updateWorldMatrix(true, false);
+    B.camera.getWorldPosition(_kcPos); B.head.getWorldPosition(_kcHead);
+    // Keep at least 1.1 m from its face along the camera bone's line, so it fills the view
+    // without the lens ending up inside its head.
+    _kcDir.subVectors(_kcPos, _kcHead); const dl = _kcDir.length();
+    if (dl < 1.1) _kcPos.copy(_kcHead).addScaledVector(_kcDir.normalize(), 1.1);
+    if (!K.started) { K.started = true; camera.position.set(me.pos.x, me.eye, me.pos.z); flashlight.intensity = 10; }
+    camera.position.lerp(_kcPos, 1 - Math.exp(-dt * (K.t < KILL.raise ? 5 : 12)));
+    camera.position.x += (Math.random() - 0.5) * shake; camera.position.y += (Math.random() - 0.5) * shake;
+    camera.lookAt(_kcHead);
+  } else if (m) {
+    // No rig (fallback model): face it, then collapse to the floor.
+    const d = Math.max(0.5, Math.hypot(m.pos.x - me.pos.x, m.pos.z - me.pos.z));
     me.yaw = angleDamp(me.yaw, Math.atan2(-(m.pos.x - me.pos.x), -(m.pos.z - me.pos.z)), 8, dt);
-    if (K.t < KILL.slam) me.pitch = damp(me.pitch, Math.atan2(head - me.eye, d), 6, dt);
+    const fall = ease((K.t - KILL.slam) / 0.6);
+    me.eye = lerp(1.6, 0.25, fall); me.roll = 1.2 * fall;
+    me.pitch = damp(me.pitch, K.t < KILL.slam ? Math.atan2(MONSTER_H - 0.6 - me.eye, d) : 0.5, 4, dt);
+    camera.position.set(me.pos.x + (Math.random() - 0.5) * shake, me.eye, me.pos.z);
+    camera.rotation.set(me.pitch, me.yaw, me.roll);
   }
-  if (K.t >= KILL.raise + 0.15 && !K.slammed) { K.slammed = true; me.damage = 1.4; sfx.hit(); sfx.heavyStep(0.9, 0); }
-  // Collapse: drop to the floor and roll onto your side, looking up.
-  const fall = ease((K.t - KILL.slam) / 0.6);
-  me.eye = lerp(me.crouch ? 1.0 : 1.6, 0.25, fall);
-  me.roll = 1.2 * fall;
-  if (K.t > KILL.slam) me.pitch = damp(me.pitch, 0.5, 3, dt);
-  const shake = K.t < KILL.slam + 0.3 ? (K.t > KILL.raise ? 0.06 : 0.015) : 0;
-  camera.position.set(me.pos.x + (Math.random() - 0.5) * shake, me.eye + (Math.random() - 0.5) * shake, me.pos.z);
-  camera.rotation.set(me.pitch, me.yaw, me.roll);
-  if (K.t > 2.8) {
-    me.killCam = null; me.roll = 0; me.eye = 1.8;
+  if (K.t > KILL.end + 0.4) {
+    // Hand over to the spectator camera, keeping the current view direction.
+    camera.getWorldDirection(_kcDir);
+    me.yaw = Math.atan2(-_kcDir.x, -_kcDir.z); me.pitch = Math.asin(clamp(_kcDir.y, -1, 1));
+    me.pos.set(camera.position.x, 0, camera.position.z); me.eye = Math.max(1.2, camera.position.y);
+    me.killCam = null; me.roll = 0; flashlight.intensity = 45;
     addFeed('You were taken. Spectating. Press V for monster vision.', 'bad');
   }
 }
@@ -2235,6 +2233,8 @@ function updateLocal(dt) {
   if (me.isMonster) speed = me.sprint ? CFG.SPEED.monsterSprint : CFG.SPEED.monster;
   else speed = me.crouch ? CFG.SPEED.crouch : me.sprint ? CFG.SPEED.sprint : CFG.SPEED.walk;
   if (me.boost > 0) speed *= 1.35;
+  const wading = inWater(me.pos.x, me.pos.z), planks = !wading && onBridge(me.pos.x, me.pos.z);
+  if (wading) speed *= me.isMonster ? 0.8 : 0.6;
   if (moving) moveWithCollision(me.pos, mx * speed * dt, mz * speed * dt, me.isMonster ? CFG.MON_R : CFG.SURV_R);
   me.moving = moving;
   if (me.isMonster) {
@@ -2244,6 +2244,8 @@ function updateLocal(dt) {
 
   // ---- Noise (what the monster "sees")
   me.noise = !moving ? (me.repairing ? CFG.NOISE.repair : 0) : me.crouch ? CFG.NOISE.crouch : me.sprint ? CFG.NOISE.sprint : CFG.NOISE.walk;
+  if (moving && wading) me.noise = Math.min(1, Math.max(0.45, me.noise * 1.8)); // splashing
+  else if (moving && planks) me.noise = Math.min(1, me.noise * 1.3);           // creaking boards
 
   // ---- Footsteps
   if (moving) {
@@ -2254,7 +2256,7 @@ function updateLocal(dt) {
         // The monster's own steps send a faint ripple — enough to feel nearby walls.
         addRipple(_v.set(me.pos.x, 0.05, me.pos.z), me.sprint ? 6 : 4.5, 0.2, 8);
         sfx.heavyStep(0.25, 0);
-      } else sfx.step(me.noise, 0);
+      } else if (wading) sfx.splash(me.noise); else if (planks) sfx.creak(me.noise); else sfx.step(me.noise, 0);
     }
   }
 
@@ -2263,7 +2265,7 @@ function updateLocal(dt) {
     me.escapeSent = true; sendToHost({ t: 'escape' });
   }
 
-  const targetEye = me.isMonster ? 1.95 : me.crouch ? 1.0 : 1.6;
+  const targetEye = me.isMonster ? 2.3 : me.crouch ? 1.0 : 1.6;
   me.eye = damp(me.eye, targetEye, 10, dt);
   me.bob += moving ? dt * speed * 2.2 : 0;
   applyCamera(dt, moving ? (me.isMonster ? 0.06 : 0.04) * (speed / 3.4) : 0);
@@ -2280,7 +2282,9 @@ const AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: 
 // Rotate a bone about one of its local axes, on top of whatever the mixer set this frame.
 function boneRot(b, axis, ang) { if (b && ang) b.quaternion.multiply(_q.setFromAxisAngle(AXES[axis], ang)); }
 const ease = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
-const KILL = { raise: 0.45, slam: 0.7, recover: 1.25, end: 1.7 }; // monster kill timeline (s)
+// Kill timeline (s), matching the monster's Jumpscare clip: it leaps (0-0.8), drives the
+// victim down (0.8-1.4), then crouches over them face to face until 4.1 s.
+const KILL = { raise: 0.8, slam: 1.4, recover: 3.6, end: 4.13 };
 
 function animateSurvivor(r, dt) {
   const a = r.avatar, A = r.anim, rig = a.userData.rig, B = a.userData.bones;
@@ -2327,40 +2331,51 @@ function animateSurvivor(r, dt) {
   }
 }
 
-// Organic layer on top of the clips: the head turns to track you when you're close,
-// random spasms jerk the head, neck and claws, and the fingers never stop trembling.
-const _lv = new THREE.Vector3(), _lq = new THREE.Quaternion(), _lAx = new THREE.Vector3();
-function boneSpin(b, x, y, z, ang) { if (!b || !ang) return; b.quaternion.multiply(_lq.setFromAxisAngle(_lAx.set(x, y, z), ang)); }
+// Dynamic layer on top of the clips, applied in world space (so it works whatever the
+// rig's bone axes are): the head turns to track a nearby survivor, random spasms jerk
+// the head, neck and hands, and the fingers never stop trembling.
+const _lv = new THREE.Vector3(), _lq = new THREE.Quaternion(), _lpq = new THREE.Quaternion(), _lAx = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+function rotateBoneWorld(b, axis, ang) {
+  if (!b || !ang || !b.parent) return;
+  b.parent.updateWorldMatrix(true, false);
+  b.parent.getWorldQuaternion(_lpq);
+  _lq.setFromAxisAngle(axis, ang).premultiply(_lpq.clone().invert()).multiply(_lpq); // parent^-1 * delta * parent
+  b.quaternion.premultiply(_lq);
+}
+const MONSTER_BONES = { head: /^head_011/, neck: /^neck2_010/, neck1: /^neck1_09/, spine: /^spine3_04/, handL: /^hand_L_08$/, handR: /^hand_R_015$/, forearmL: /^forarm_L_07/, forearmR: /^forarm_R_014/, camera: /^camera_024$/ };
 function liveLayer(g, M, dt) {
   const B = M.bones;
-  // Head tracking (only when a survivor is looking at it from nearby)
-  const watching = viewMode === 'survivor' && M.anim.shot !== 'kill';
+  // Head tracking: only when a survivor is watching from nearby, and not mid-kill.
+  const watching = viewMode === 'survivor' && M.anim.shot !== 'jumpscare';
   g.worldToLocal(_lv.copy(camera.position));
   const dist = Math.hypot(_lv.x, _lv.z);
-  M.look = damp(M.look, watching && dist < 14 ? 1 : 0, 3, dt);
+  M.look = damp(M.look, watching && dist < 16 ? 1 : 0, 2.5, dt);
   if (M.look > 0.01) {
-    const yaw = clamp(Math.atan2(-_lv.x, -_lv.z), -1.3, 1.3) * M.look;   // model +Z is the avatar's -Z
-    const pitch = clamp(-Math.atan2(_lv.y - 1.9, dist), -0.6, 0.6) * M.look;
-    if (B.Neck) B.Neck.quaternion.premultiply(_lq.setFromAxisAngle(_lAx.set(0, 1, 0), yaw * 0.45));
-    if (B.Head) { B.Head.quaternion.premultiply(_lq.setFromAxisAngle(_lAx.set(0, 1, 0), yaw * 0.55)); boneSpin(B.Head, 1, 0, 0, pitch); }
+    const yaw = clamp(Math.atan2(-_lv.x, -_lv.z), -1.4, 1.4) * M.look;  // relative to the avatar's facing (-Z)
+    rotateBoneWorld(B.neck1, UP, yaw * 0.4);
+    rotateBoneWorld(B.head, UP, yaw * 0.6);
+    // tilt the head down/up toward the watcher: axis is the avatar's sideways direction
+    const side = _lAx.set(Math.cos(g.rotation.y), 0, -Math.sin(g.rotation.y));
+    rotateBoneWorld(B.head, side, clamp(Math.atan2(_lv.y - 2.3, Math.max(dist, 0.5)), -0.6, 0.5) * M.look);
   }
-  // Spasms: every few seconds one body part jerks sharply then eases back.
+  // Spasms
   if (time > M.nextSpasm) {
-    M.nextSpasm = time + 1.5 + Math.random() * 4;
-    const parts = ['Head', 'Head', 'Neck', 'ClawsL', 'ClawsR', 'HandL', 'HandR', 'Chest'];
-    const name = parts[Math.floor(Math.random() * parts.length)], big = /Claws|Hand/.test(name);
-    const ax = [Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5]; const n = Math.hypot(...ax) || 1;
-    M.spasms.push({ bone: B[name], ax: ax.map((v) => v / n), amp: (big ? 0.7 : 0.45) * (Math.random() < 0.5 ? -1 : 1), t: 0, dur: 0.25 + Math.random() * 0.5 });
+    M.nextSpasm = time + 1.2 + Math.random() * 3.5;
+    const parts = ['head', 'head', 'neck', 'handL', 'handR', 'forearmL', 'forearmR', 'spine'];
+    const name = parts[Math.floor(Math.random() * parts.length)];
+    const ax = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    M.spasms.push({ bone: B[name], ax, amp: (/hand|fore/.test(name) ? 0.6 : 0.4) * (Math.random() < 0.5 ? -1 : 1), t: 0, dur: 0.2 + Math.random() * 0.45 });
   }
   M.spasms = M.spasms.filter((sp) => {
     sp.t += dt;
-    const env = sp.t < 0.05 ? sp.t / 0.05 : Math.pow(Math.max(0, 1 - (sp.t - 0.05) / sp.dur), 2);
-    boneSpin(sp.bone, sp.ax[0], sp.ax[1], sp.ax[2], sp.amp * env);
-    return sp.t < sp.dur + 0.05;
+    const env = sp.t < 0.04 ? sp.t / 0.04 : Math.pow(Math.max(0, 1 - (sp.t - 0.04) / sp.dur), 2);
+    rotateBoneWorld(sp.bone, sp.ax, sp.amp * env);
+    return sp.t < sp.dur + 0.04;
   });
-  // Constant tremor in the claws
-  boneSpin(B.ClawsL, 0, 1, 0, Math.sin(time * 31) * 0.05 + Math.sin(time * 17.3) * 0.04);
-  boneSpin(B.ClawsR, 0, 1, 0, Math.sin(time * 29 + 1) * 0.05 + Math.sin(time * 19.1) * 0.04);
+  // Finger tremor
+  rotateBoneWorld(B.handL, UP, Math.sin(time * 31) * 0.06 + Math.sin(time * 17.3) * 0.04);
+  rotateBoneWorld(B.handR, UP, Math.sin(time * 29 + 1) * 0.06 + Math.sin(time * 19.1) * 0.04);
 }
 
 function animateMonster(r, dt) {
@@ -2371,10 +2386,30 @@ function animateMonster(r, dt) {
     rig.position.y = Math.abs(Math.sin(r.walkT * 0.5)) * 0.08 * Math.min(gait, 1.5);
     return;
   }
-  // Still for a moment -> drops into its listening crouch and fades almost completely.
-  M.stillT = r.speed < 0.3 && !M.anim.busy() ? M.stillT + dt : 0;
+  const busy = M.anim.busy();
+  // ---- Dynamic motion
+  // Turn banking and acceleration pitch, from how its heading and speed are changing.
+  let dYaw = r.yaw - (M.prevYaw ?? r.yaw); dYaw = ((dYaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+  const turnRate = dYaw / Math.max(dt, 1e-4), accel = (r.speed - (M.prevSpeed ?? r.speed)) / Math.max(dt, 1e-4);
+  M.prevYaw = r.yaw; M.prevSpeed = r.speed;
+  M.bank = damp(M.bank, clamp(-turnRate * r.speed * 0.05, -0.35, 0.35), 5, dt);
+  M.pitch = damp(M.pitch, clamp(accel * 0.03, -0.15, 0.25), 4, dt);
+  rig.rotation.z = M.bank; rig.rotation.x = M.pitch;
+  // Idle playback drifts so the loop never looks the same twice.
+  M.rateT -= dt;
+  if (M.rateT <= 0) { M.rateT = 1.5 + Math.random() * 3; M.rateTarget = 0.75 + Math.random() * 0.55; }
+  M.anim.rate = damp(M.anim.rate, M.rateTarget, 1.5, dt);
+  // Stop-motion stutter: it freezes for a few frames, then lurches to catch up.
+  let adt = dt;
+  if (!busy) {
+    if (M.freeze > 0) { M.freeze -= dt; M.owed += dt; adt = 0; }
+    else if (M.owed > 0) { const pay = Math.min(M.owed, dt * 1.5); M.owed -= pay; adt = dt + pay; }
+    else if (Math.random() < dt * (r.speed > 0.5 ? 0.5 : 0.25)) M.freeze = 0.06 + Math.random() * 0.16;
+  }
+  // ---- Animation + camouflage
+  M.stillT = r.speed < 0.3 && !busy ? M.stillT + dt : 0;
   const still = M.stillT > 0.6 ? 1 : 0;
-  M.anim.update(dt, r.speed, still);
+  M.anim.update(adt, r.speed);
   liveLayer(a, M, dt);
   M.camo = still ? Math.min(1, M.camo + dt / 1.2) : Math.max(0, M.camo - dt / 0.25);
   const op = 1 - M.camo; // fully invisible once camouflaged
@@ -2432,6 +2467,7 @@ function updateWorld(dt, monsterDist) {
       : 0.9 + Math.sin(time * 31 + l.phase) * 0.04 + (Math.sin(time * 2.3 + l.phase) > 0.97 ? -0.5 : 0);
     l.light.intensity = l.base * k;
   }
+  if (world.mist) { for (const w of world.mist) w.m.position.x = w.x + Math.sin(time * 0.07 + w.phase) * 2.5; if (world.mist[0]) world.mist[0].m.material.opacity = 0.5 + Math.sin(time * 0.2) * 0.1; }
   if (world.fire) world.fire.flames.forEach((f, i) => { f.scale.set(1, 0.8 + Math.sin(time * 11 + i * 2) * 0.25 + Math.random() * 0.1, 1); f.rotation.y = time * (1 + i); });
   // Generators
   world.gens.forEach((g, i) => {
@@ -2544,7 +2580,7 @@ let botN = 1;
 function addBot(isMonster) {
   if (isMonster) for (const p of Object.values(hs.players)) p.isMonster = false; // only one monster
   const id = 'bot-' + botN;
-  hs.players[id] = newHostPlayer(id, isMonster ? 'The Wendigo' : 'Bot ' + botN, isMonster, true);
+  hs.players[id] = newHostPlayer(id, isMonster ? 'The Stalker' : 'Bot ' + botN, isMonster, true);
   botN++;
 }
 $('#btn-add-bot').onclick = () => { addBot(false); broadcastLobby(); };
@@ -2599,6 +2635,7 @@ const inviteCode = (location.hash.match(/join=([A-Za-z0-9]{4,6})/) || [])[1];
 if (inviteCode && !EMBEDDED) $('#code-input').value = inviteCode.toUpperCase();
 loadAssets((f) => menuStatus(`Loading models… ${Math.round(f * 100)}%`)).finally(() => {
   menuStatus(ASSETS.survivor && ASSETS.monster ? '' : 'Some models failed to load; using simple stand-ins.', !(ASSETS.survivor && ASSETS.monster));
+  buildBridges(mulberry32(77));
   for (const id of ['#btn-bot-survivor', '#btn-bot-monster', '#btn-host', '#btn-offline', '#btn-join']) $(id).disabled = false;
   if (inviteCode && !EMBEDDED) {
     history.replaceState(null, '', location.pathname + location.search); // don't rejoin on refresh
@@ -2630,4 +2667,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
