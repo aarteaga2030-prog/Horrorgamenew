@@ -19,6 +19,15 @@
       <h1 class="title">BLINDSIGHT</h1>
       <p class="tagline">It cannot see you. It can hear you.</p>
 
+      <label for="mode-select">Game mode
+        <select id="mode-select">
+          <option value="escape">Escape</option>
+          <option value="ritual">Ritual</option>
+          <option value="survive">Last Light</option>
+        </select>
+      </label>
+      <p id="mode-desc" class="muted mode-desc"></p>
+
       <div id="menu-main">
         <label for="name-input">Your name <input id="name-input" maxlength="16" placeholder="Survivor" /></label>
 
@@ -28,7 +37,7 @@
             <button id="btn-bot-survivor" class="primary" disabled>Play as survivor</button>
             <button id="btn-bot-monster" class="primary" disabled>Play as monster</button>
           </div>
-          <p class="muted">As survivor you face a bot monster that hunts by sound. As monster you hunt two bot survivors.</p>
+          <p class="muted">As survivor you face a bot monster that hunts by sound. As monster you hunt two bot survivors. Both use the game mode above.</p>
         </div>
 
         <div class="group" id="online-group">
@@ -73,7 +82,7 @@
             <h3>Survivors</h3>
             <p>Repair all <b>3 generators</b> (hold <kbd>E</kbd>) to open the exit gate, then escape. Or stay alive until the timer runs out.</p>
             <p>Every step makes noise. <kbd>C</kbd> crouch is nearly silent, <kbd>Shift</kbd> sprinting is loud. Repairing hums.</p>
-            <p><kbd>F</kbd> flashlight. Two hits and you're taken.</p>
+            <p><kbd>F</kbd> flashlight. <kbd>E</kbd> hides you in lockers and outhouses for as long as you can hold your breath. <kbd>G</kbd> throws a stone as a decoy. Two hits and you're taken.</p>
           </div>
           <div>
             <h3>The Monster</h3>
@@ -102,6 +111,8 @@
       <div class="stat"><span>Health</span><span id="hp-pips"></span></div>
       <div class="stat"><span>Stamina</span><div class="bar"><div id="stamina-fill"></div></div></div>
       <div class="stat"><span>Noise</span><div class="bar noise"><div id="noise-fill"></div></div></div>
+      <div class="stat hidden" id="breath-row"><span>Breath</span><div class="bar"><div id="breath-fill"></div></div></div>
+      <div class="stat"><span>Stones (G)</span><span id="stone-count">3</span></div>
     </div>
 
     <div id="hud-monster" class="hud-box hidden">
@@ -113,6 +124,7 @@
     </div>
   </div>
 
+  <div id="hide-overlay" class="hidden"></div>
   <div id="resume" class="hidden"><div>Click to resume</div></div>
 
   <div id="endscreen" class="screen hidden">

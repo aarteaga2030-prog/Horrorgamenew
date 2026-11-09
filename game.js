@@ -72,12 +72,49 @@ const CABINS = [
   { x: 38, z: 40, w: 10, d: 8, door: 'south', split: true },
   { x: 88, z: 68, w: 8, d: 7, door: 'west' },
   { x: 28, z: 86, w: 5, d: 4.4, door: 'east' },
+  { x: 84, z: 26, w: 9, d: 12, door: 'south', chapel: true },
 ];
+const TOWER = { x: 96, z: 96 };              // ranger watchtower with a sweeping searchlight
+const CIRCLE = { x: 20, z: 24, r: 5 };       // standing stones; the altar is at the centre
+const TRUCK = { x: 66.8, z: 109 };           // wreck by the gate
+const GRAVES = { x0: 66, x1: 78, z0: 22, z1: 36 };
+const LAMPS = [[61.6, 108], [50.6, 84], [73, 84.6], [62, 41]];
+// Hiding places: step inside (E) and you make no sound and can't be seen or heard, but
+// only for as long as you can hold your breath. ry = the way the door faces.
+const LOCKERS = [
+  { x: 38.4, z: 36.6, ry: Math.PI },       // main cabin
+  { x: 91.4, z: 70.6, ry: Math.PI / 2 },   // hunting cabin
+  { x: 80.2, z: 22, ry: -Math.PI / 2 },    // chapel
+  { x: 87.8, z: 28.5, ry: Math.PI / 2 },   // chapel
+  { x: 96, z: 99.6, ry: 0 },               // outhouse by the tower
+  { x: 46.5, z: 100.5, ry: -Math.PI / 2 }, // outhouse by the camp
+];
+const HIDE_MAX = 15, HIDE_COOLDOWN = 8;
 const GENS = [
   { x: 34.6, z: 38.4, ry: Math.PI / 2 },   // main cabin, west room
   { x: 90, z: 66.4, ry: 0 },               // hunting cabin
   { x: 26.8, z: 86, ry: Math.PI / 2 },     // shed
 ];
+// ---- Game modes ---------------------------------------------------------------------
+const MODES = {
+  escape: { name: 'Escape', desc: 'Repair 3 generators to open the gate, then get out. Survivors also win at dawn.', duration: 300 },
+  ritual: { name: 'Ritual', desc: 'Find 5 relics, then banish it at the stone circle before dawn.', duration: 360 },
+  survive: { name: 'Last Light', desc: 'No way out. Stay alive until dawn. The moon exposes anyone not hidden.', duration: 200 },
+};
+const RELIC_SPOTS = [[84, 22.2], [73, 30], [96, 93.2], [64.2, 107], [40.5, 41], [86.5, 70], [29.3, 86.9], [12, 58], [108, 84], [58, 14], [20, 96], [104, 40]];
+// The current match's objectives: { x, z, ry, kind: 'gen' | 'relic' | 'altar' }.
+let OBJ = GENS.map((g) => ({ ...g, kind: 'gen' }));
+function makeObjectives(mode) {
+  if (mode === 'escape') return GENS.map((g) => ({ ...g, kind: 'gen' }));
+  if (mode === 'ritual') {
+    const spots = RELIC_SPOTS.slice().sort(() => Math.random() - 0.5).slice(0, 5);
+    return spots.map(([x, z]) => ({ x, z, ry: 0, kind: 'relic' })).concat([{ x: CIRCLE.x, z: CIRCLE.z, ry: 0, kind: 'altar' }]);
+  }
+  return [];
+}
+// The altar only works once every relic has been found.
+const objLocked = (i, state) => OBJ[i].kind === 'altar' && OBJ.some((o, k) => o.kind === 'relic' && !state[k].done);
+const OBJ_NOISE = { gen: 0.55, relic: 0.2, altar: 0.8 };
 const CAMPFIRE = { x: 58, z: 96 };
 const SPAWN_SURV = [[54, 99], [62, 99], [58, 101.5], [55, 93], [61, 93], [58, 90.5]];
 const SPAWN_MON = { x: 98, z: 18 };
@@ -87,6 +124,9 @@ const PATHS = [
   [[58, 96], [70, 86], [80, 74], [83.5, 68]],
   [[58, 96], [44, 92], [31, 86]],
   [[40, 47], [56, 53], [72, 60], [83.5, 68]],   // trail between the two cabins
+  [[56, 53], [66, 44], [78, 38], [84, 33]],     // to the chapel
+  [[36, 46], [27, 38], [21, 30]],               // to the stone circle
+  [[70, 86], [84, 92], [93, 95.5]],             // to the watchtower
 ];
 const doorPos = (c) => ({
   south: { x: c.x, z: c.z + c.d / 2 }, north: { x: c.x, z: c.z - c.d / 2 },
@@ -229,9 +269,9 @@ function nearestOpen(t, allowExit) {
   return null;
 }
 const randomFloorTile = () => NAV_FREE[Math.floor(Math.random() * NAV_FREE.length)];
-const genPos = (i) => new THREE.Vector3(GENS[i].x, 0, GENS[i].z);
+const genPos = (i) => new THREE.Vector3(OBJ[i].x, 0, OBJ[i].z);
 // A free nav cell beside each generator, on its working side.
-const genApproach = (i) => nearestOpen(tileOf(GENS[i].x + Math.sin(GENS[i].ry) * 1.2, GENS[i].z + Math.cos(GENS[i].ry) * 1.2), false) || tileOf(GENS[i].x, GENS[i].z);
+const genApproach = (i) => { const o = OBJ[i], off = o.kind === 'relic' ? 0 : 1.2, t = tileOf(o.x + Math.sin(o.ry) * off, o.z + Math.cos(o.ry) * off); return navOpen(t.x, t.z, false) ? t : (nearestOpen(t, false) || t); };
 
 // ----------------------------------------------------------------------------
 //  RENDERER, SCENE, CAMERA
@@ -420,16 +460,22 @@ const SonarPostShader = {
     }`,
 };
 const SurvivorPostShader = {
-  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uDamage: { value: 0 }, uLowHp: { value: 0 }, uFear: { value: 0 } },
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uDamage: { value: 0 }, uLowHp: { value: 0 }, uFear: { value: 0 }, uFlash: { value: 0 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse; uniform float uTime; uniform float uDamage; uniform float uLowHp; uniform float uFear;
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uDamage; uniform float uLowHp; uniform float uFear; uniform float uFlash;
     varying vec2 vUv;
     float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453); }
     void main(){
       vec2 c = vUv - 0.5;
       vec2 uv = vUv + c * uFear * 0.01 * sin(uTime * 7.0);
-      vec3 col = texture2D(tDiffuse, uv).rgb;
+      // Lens fringing that grows with fear, toward the edges of the frame
+      vec2 ca = c * (0.0025 + uFear * 0.012) * dot(c, c) * 4.0;
+      vec3 col = vec3(texture2D(tDiffuse, uv + ca).r, texture2D(tDiffuse, uv).g, texture2D(tDiffuse, uv - ca).b);
+      // Grade: cold shadows, warm highlights
+      float l0 = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(col * vec3(0.86, 0.98, 1.14), col * vec3(1.1, 1.0, 0.88), smoothstep(0.15, 0.8, l0));
+      col *= 1.0 + uFlash * 0.6;
       float vig = smoothstep(0.9 - uFear * 0.2, 0.2, length(c));
       col *= mix(0.45, 1.0, vig);
       float lum = dot(col, vec3(0.299, 0.587, 0.114));
@@ -440,18 +486,18 @@ const SurvivorPostShader = {
       gl_FragColor = vec4(col, 1.0);
     }`,
 };
-function buildComposer(passShader, bloom) {
+function buildComposer(passShader, bloom) { // bloom: false, true (monster defaults) or [strength, radius, threshold]
   const comp = new EffectComposer(renderer);
   comp.addPass(new RenderPass(scene, camera));
   let bloomPass = null;
-  if (bloom) { bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.85, 0.5, 0.03); comp.addPass(bloomPass); }
+  if (bloom) { const [st, ra, th] = bloom === true ? [0.85, 0.5, 0.03] : bloom; bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), st, ra, th); comp.addPass(bloomPass); }
   const pass = new ShaderPass(passShader);
   comp.addPass(pass);
   comp.addPass(new OutputPass());
   return { comp, pass, bloomPass };
 }
 const monsterPost = buildComposer(SonarPostShader, true);
-const survivorPost = buildComposer(SurvivorPostShader, false);
+const survivorPost = buildComposer(SurvivorPostShader, [0.55, 0.7, 0.85]); // fire, windows, relics and eyes glow
 
 // ----------------------------------------------------------------------------
 //  PROCEDURAL TEXTURES (no external assets)
@@ -545,7 +591,10 @@ const TEX = {
 // ----------------------------------------------------------------------------
 //  WORLD CONSTRUCTION
 // ----------------------------------------------------------------------------
-const world = { gens: [], gate: null, flickers: [], exitLight: null, fire: null };
+TEX.glow = canvasTex(64, (g, s) => { const grd = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2); grd.addColorStop(0, 'rgba(255,255,255,1)'); grd.addColorStop(0.25, 'rgba(255,255,255,0.7)'); grd.addColorStop(1, 'rgba(255,255,255,0)'); g.clearRect(0, 0, s, s); g.fillStyle = grd; g.fillRect(0, 0, s, s); });
+const world = { gens: [], gate: null, flickers: [], exitLight: null, fire: null, relics: [] };
+const fx = { lightning: 0, nextLightning: 20 };
+const BUSHES = [];
 const MAT = {};
 function stdMat(opts) { return new THREE.MeshStandardMaterial(Object.assign({ roughness: 0.9, metalness: 0 }, opts)); }
 // Bucket static geometry into 30 m chunks so off-screen forest is frustum-culled.
@@ -697,6 +746,11 @@ function keepClear(x, z, extra = 0) {
   for (const c of CABINS) if (Math.abs(x - c.x) < c.w / 2 + 3 + extra && Math.abs(z - c.z) < c.d / 2 + 3 + extra) return true;
   if (Math.hypot(x - CAMPFIRE.x, z - CAMPFIRE.z) < 10 + extra) return true;
   if (Math.hypot(x - SPAWN_MON.x, z - SPAWN_MON.z) < 3) return true;
+  if (Math.hypot(x - TOWER.x, z - TOWER.z) < 5.5 + extra || Math.hypot(x - CIRCLE.x, z - CIRCLE.z) < CIRCLE.r + 3 + extra) return true;
+  if (Math.abs(x - TRUCK.x) < 3 && Math.abs(z - TRUCK.z) < 4.5) return true;
+  if (x > GRAVES.x0 - 1 && x < GRAVES.x1 + 1 && z > GRAVES.z0 - 1 && z < GRAVES.z1 + 1) return true;
+  for (const L of LOCKERS) if (Math.hypot(x - L.x, z - L.z) < 2.6) return true;
+  for (const [lx, lz] of LAMPS) if (Math.hypot(x - lx, z - lz) < 1.5) return true;
   if (nearPath(x, z, 2.3 + extra)) return true;
   if (Math.abs(x - GATE.x) < 7 && z > AREA - 12) return true;
   if (x > EXIT_ZONE.minX - 3 && x < EXIT_ZONE.maxX + 3 && z > AREA - 4) return true;
@@ -771,25 +825,164 @@ function buildCabin(c, i) {
     ge.rotation.y = Math.PI / 2; ge.position.set(c.x + s * c.w / 2, H, c.z); g.add(ge);
   }
   // Glowing windows on the long walls and a warm lamp inside
-  const winMat = new THREE.MeshStandardMaterial({ color: 0x1a1006, emissive: 0xffa040, emissiveIntensity: 1.6 });
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x1a1006, emissive: c.chapel ? 0x5f7fe0 : 0xffa040, emissiveIntensity: c.chapel ? 1.0 : 1.6 });
   for (const s of [-1, 1]) for (const fx of [-0.28, 0.28]) {
     if (c.door === (s < 0 ? 'north' : 'south') && Math.abs(fx) < 0.1) continue;
     const win = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.6), winMat);
     win.position.set(c.x + fx * c.w, 1.5, c.z + s * (c.d / 2 + T / 2 + 0.01)); win.rotation.y = s < 0 ? Math.PI : 0;
     g.add(win);
   }
-  const lamp = new THREE.PointLight(0xffa860, 6, 9, 1.6); lamp.position.set(c.x + (c.split ? -c.w / 4 - 0.3 : 0), 2.2, c.z);
+  const lamp = new THREE.PointLight(c.chapel ? 0x7088ff : 0xffa860, c.chapel ? 4 : 6, c.chapel ? 12 : 9, 1.6); lamp.position.set(c.x + (c.split ? -c.w / 4 - 0.3 : 0), 2.2, c.z);
   g.add(lamp); survivorOnly.push(lamp);
   world.flickers.push({ light: lamp, base: 6, phase: i * 13.7, kind: 'lamp' });
   // Furniture (colliders too)
   const furn = [];
-  if (c.split) { furn.push([c.x + 2.5, c.z - 2.2, 1.6, 0.8, 0.8]); furn.push([c.x + 3.6, c.z + 2.4, 1.0, 0.6, 1.9]); }
+  if (c.chapel) { for (const px of [-2, 2]) for (const pz of [-2, 0.6, 3.2]) furn.push([c.x + px, c.z + pz, 2.3, 0.5, 0.55]); furn.push([c.x, c.z - 4.6, 1.8, 1.0, 0.8]); }
+  else if (c.split) { furn.push([c.x + 2.5, c.z - 2.2, 1.6, 0.8, 0.8]); furn.push([c.x + 3.6, c.z + 2.4, 1.0, 0.6, 1.9]); }
   else if (c.w > 6) furn.push([c.x - 2.2, c.z - 2.0, 1.2, 0.8, 0.8]);
   for (const [fx, fz, fw, fh, fd] of furn) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, fd), stdMat({ map: TEX.crate })); m.position.set(fx, fh / 2, fz); m.castShadow = true;
     g.add(m); addBox(fx - fw / 2, fz - fd / 2, fx + fw / 2, fz + fd / 2, 'furniture');
   }
   scene.add(reg(g));
+}
+
+// ---- Landmarks ---------------------------------------------------------------------
+function buildChapelExtras(c) {
+  const g = new THREE.Group();
+  // Steeple over the door, with a cross
+  const zf = c.z + c.d / 2 - 1.2;
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(2.2, 3.4, 2.2), stdMat({ map: TEX.logs })); tower.position.set(c.x, 4.4, zf);
+  const spire = new THREE.Mesh(new THREE.ConeGeometry(1.8, 3.2, 4), stdMat({ map: TEX.roof })); spire.position.set(c.x, 7.7, zf); spire.rotation.y = Math.PI / 4;
+  const crossMat = stdMat({ color: 0x15120e });
+  const cv = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.3, 0.12), crossMat); cv.position.set(c.x, 9.8, zf);
+  const ch = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.12, 0.12), crossMat); ch.position.set(c.x, 10.0, zf);
+  const bell = new THREE.Mesh(new THREE.SphereGeometry(0.4, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), stdMat({ color: 0x4a3c20, metalness: 0.8, roughness: 0.4 })); bell.position.set(c.x, 4.6, zf);
+  for (const m of [tower, spire, cv, ch]) m.castShadow = true;
+  g.add(tower, spire, cv, ch, bell);
+  scene.add(reg(g));
+}
+function buildGraveyard(rng) {
+  const geos = [];
+  for (let gx = GRAVES.x0 + 2; gx < GRAVES.x1 - 1; gx += 2.6) for (let gz = GRAVES.z0 + 2; gz < GRAVES.z1 - 1; gz += 3.3) {
+    if (rng() < 0.2) continue;
+    const x = gx + (rng() - 0.5) * 0.6, z = gz + (rng() - 0.5) * 0.6, h = 0.7 + rng() * 0.5;
+    const cross = rng() < 0.25;
+    if (cross) {
+      const a = new THREE.BoxGeometry(0.12, h + 0.5, 0.12); a.rotateZ((rng() - 0.5) * 0.25); a.translate(x, (h + 0.5) / 2, z); geos.push(a);
+      const b = new THREE.BoxGeometry(0.6, 0.12, 0.12); b.translate(x, h + 0.1, z); geos.push(b);
+    } else {
+      const s = new THREE.BoxGeometry(0.55, h, 0.16); s.rotateX((rng() - 0.5) * 0.3); s.rotateZ((rng() - 0.5) * 0.2); s.translate(x, h / 2 - 0.05, z); geos.push(s);
+      const mound = new THREE.BoxGeometry(0.7, 0.12, 1.7); mound.translate(x, 0.05, z + 1.05); geos.push(mound);
+    }
+    addCircle(x, z, 0.32, 'grave');
+  }
+  const m = new THREE.Mesh(mergeGeometries(geos), MAT.rock); m.castShadow = m.receiveShadow = true;
+  scene.add(reg(m));
+}
+function buildTower() {
+  const g = new THREE.Group(); g.position.set(TOWER.x, 0, TOWER.z);
+  const wood = MAT.fence, H = 6.5;
+  for (const sx of [-1.8, 1.8]) for (const sz of [-1.8, 1.8]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.28, H, 0.28), wood); leg.position.set(sx, H / 2, sz); leg.castShadow = true; g.add(leg);
+    addCircle(TOWER.x + sx, TOWER.z + sz, 0.25, 'tower');
+  }
+  for (const [ax, az, rot] of [[0, -1.8, 0], [0, 1.8, 0], [-1.8, 0, Math.PI / 2], [1.8, 0, Math.PI / 2]]) {
+    for (const s of [-1, 1]) {
+      const brace = new THREE.Mesh(new THREE.BoxGeometry(5.0, 0.12, 0.12), wood);
+      brace.position.set(ax, 2.6, az); brace.rotation.set(0, rot, s * 0.75); g.add(brace);
+    }
+  }
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.2, 4.6), wood); deck.position.y = H; deck.castShadow = true; g.add(deck);
+  for (const [ax, az, w, d] of [[0, -2.2, 4.6, 0.1], [0, 2.2, 4.6, 0.1], [-2.2, 0, 0.1, 4.6], [2.2, 0, 0.1, 4.6]]) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(w, 0.9, d), wood); rail.position.set(ax, H + 0.55, az); g.add(rail);
+  }
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(3.6, 1.6, 4), stdMat({ map: TEX.roof })); roof.position.y = H + 3; roof.rotation.y = Math.PI / 4; g.add(roof);
+  for (const sx of [-2, 2]) for (const sz of [-2, 2]) { const p = new THREE.Mesh(new THREE.BoxGeometry(0.14, 2.2, 0.14), wood); p.position.set(sx, H + 1.2, sz); g.add(p); }
+  const ladder = new THREE.Mesh(new THREE.BoxGeometry(0.5, H, 0.08), wood); ladder.position.set(0, H / 2, -2.0); ladder.rotation.x = 0.08; g.add(ladder);
+  scene.add(reg(g));
+  // The searchlight: a slow beam sweeping the forest. It's the only light out there.
+  const lamp = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.32, 0.5, 10), new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0xdfe8ff, emissiveIntensity: 3 }));
+  lamp.position.set(TOWER.x, H + 1.6, TOWER.z); scene.add(lamp); survivorOnly.push(lamp);
+  const light = new THREE.SpotLight(0xdfe8ff, 900, 70, 0.13, 0.6, 1.3); light.position.copy(lamp.position);
+  scene.add(light, light.target); survivorOnly.push(light);
+  const len = 46, cg = new THREE.ConeGeometry(Math.tan(0.13) * len, len, 20, 1, true); cg.translate(0, -len / 2, 0); cg.rotateX(-Math.PI / 2);
+  const cone = new THREE.Mesh(cg, new THREE.MeshBasicMaterial({ color: 0xbfd0ff, transparent: true, opacity: 0.035, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, fog: false }));
+  cone.position.copy(lamp.position); scene.add(cone); survivorOnly.push(cone);
+  world.search = { light, cone, lamp };
+}
+function buildStoneCircle(rng) {
+  const g = new THREE.Group();
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2 + 0.2, x = CIRCLE.x + Math.cos(a) * CIRCLE.r, z = CIRCLE.z + Math.sin(a) * CIRCLE.r, h = 2.2 + rng() * 1.2;
+    const st = new THREE.Mesh(new THREE.BoxGeometry(0.95, h, 0.5), MAT.rock);
+    st.position.set(x, h / 2 - 0.1, z); st.rotation.set((rng() - 0.5) * 0.12, -a + Math.PI / 2, (rng() - 0.5) * 0.12); st.castShadow = true; g.add(st);
+    addCircle(x, z, 0.55, 'stone');
+    if (i % 3 === 0) { const lintel = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 1.3), MAT.rock); lintel.position.set(x, h + 0.05, z); lintel.rotation.y = -a + Math.PI / 2; g.add(lintel); }
+  }
+  const altar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.9, 0.9), MAT.rock); altar.position.set(CIRCLE.x, 0.45, CIRCLE.z); altar.castShadow = true; g.add(altar);
+  addBox(CIRCLE.x - 0.8, CIRCLE.z - 0.45, CIRCLE.x + 0.8, CIRCLE.z + 0.45, 'altar');
+  // Rune ring on the ground: dark until relics are found
+  const tex = canvasTex(512, (c, s, r) => {
+    c.fillStyle = '#000'; c.fillRect(0, 0, s, s); c.strokeStyle = '#fff'; c.lineWidth = 3;
+    for (const rad of [0.3, 0.47]) { c.beginPath(); c.arc(s / 2, s / 2, s * rad, 0, Math.PI * 2); c.stroke(); }
+    for (let i = 0; i < 28; i++) {
+      const a = (i / 28) * Math.PI * 2, x = s / 2 + Math.cos(a) * s * 0.385, y = s / 2 + Math.sin(a) * s * 0.385;
+      c.save(); c.translate(x, y); c.rotate(a + Math.PI / 2); c.beginPath();
+      for (let k = 0; k < 4; k++) { c.moveTo((r() - 0.5) * 22, (r() - 0.5) * 30); c.lineTo((r() - 0.5) * 22, (r() - 0.5) * 30); }
+      c.stroke(); c.restore();
+    }
+    for (let i = 0; i < 7; i++) { const a = (i / 7) * Math.PI * 2 + 0.2; c.beginPath(); c.moveTo(s / 2, s / 2); c.lineTo(s / 2 + Math.cos(a) * s * 0.3, s / 2 + Math.sin(a) * s * 0.3); c.stroke(); }
+  });
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  const mat = new THREE.MeshStandardMaterial({ color: 0x000000, emissive: 0x7fc8ff, emissiveMap: tex, emissiveIntensity: 0, transparent: true, alphaMap: tex, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
+  const ring = new THREE.Mesh(new THREE.PlaneGeometry(CIRCLE.r * 2.3, CIRCLE.r * 2.3), mat); ring.rotation.x = -Math.PI / 2; ring.position.set(CIRCLE.x, 0.03, CIRCLE.z);
+  scene.add(ring); survivorOnly.push(ring);
+  world.altar = mat;
+  scene.add(reg(g));
+}
+function buildTruck() {
+  const g = new THREE.Group(); g.position.set(TRUCK.x, 0, TRUCK.z); g.rotation.z = 0.04;
+  const rust = stdMat({ color: 0x4a3328, roughness: 0.8, metalness: 0.4 }), dark = stdMat({ color: 0x0c0c0c, roughness: 0.9 });
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.9, 4.8), rust); bed.position.y = 1.0;
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.0, 1.7), rust); cab.position.set(0, 1.9, -1.0);
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.6, 0.05), stdMat({ color: 0x0a1418, roughness: 0.1, metalness: 0.8 })); glass.position.set(0, 2.0, -1.87);
+  g.add(bed, cab, glass);
+  for (const sx of [-1.05, 1.05]) for (const sz of [-1.6, 1.6]) { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.48, 0.32, 12), dark); w.rotation.z = Math.PI / 2; w.position.set(sx, 0.48, sz); g.add(w); }
+  const lampMat = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0xffe9b0, emissiveIntensity: 1.5 });
+  for (const sx of [-0.7, 0.7]) { const h = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.06), lampMat); h.position.set(sx, 1.1, -2.43); g.add(h); }
+  g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  world.truckLamp = lampMat;
+  addBox(TRUCK.x - 1.15, TRUCK.z - 2.5, TRUCK.x + 1.15, TRUCK.z + 2.5, 'truck');
+  scene.add(reg(g));
+}
+function buildLamps() {
+  LAMPS.forEach(([x, z], i) => {
+    const g = new THREE.Group(); g.position.set(x, 0, z);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 3.6, 8), MAT.metal); pole.position.y = 1.8; pole.castShadow = true;
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.06, 0.06), MAT.metal); arm.position.set(0.3, 3.55, 0);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x1a1408, emissive: 0xffc27a, emissiveIntensity: 3 });
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.14, 0.2), mat); head.position.set(0.6, 3.46, 0);
+    g.add(pole, arm, head);
+    const light = new THREE.PointLight(0xffc27a, 11, 15, 1.7); light.position.set(0.6, 3.3, 0); g.add(light); survivorOnly.push(light);
+    world.flickers.push({ light, base: 11, phase: i * 7.3, kind: i === 1 ? 'dying' : 'lamp', mat });
+    addCircle(x, z, 0.14, 'lamp');
+    scene.add(reg(g));
+  });
+}
+function buildLockers() {
+  LOCKERS.forEach((L, i) => {
+    const g = new THREE.Group(); g.position.set(L.x, 0, L.z); g.rotation.y = L.ry;
+    const out = i >= 4; // outdoor ones are wooden outhouses
+    const w = out ? 1.1 : 0.9, d = out ? 1.1 : 0.6, h = out ? 2.2 : 2.0;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), out ? stdMat({ map: TEX.planks, color: 0x8a7a66 }) : MAT.metal); body.position.y = h / 2; body.castShadow = true; g.add(body);
+    const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.84, h * 0.9, 0.04), out ? stdMat({ map: TEX.planks, color: 0x6e6050 }) : stdMat({ color: 0x2c3638, metalness: 0.7, roughness: 0.5 })); door.position.set(0, h / 2, -d / 2 - 0.02); g.add(door);
+    for (let k = 0; k < 4; k++) { const slit = new THREE.Mesh(new THREE.BoxGeometry(w * 0.55, 0.03, 0.02), stdMat({ color: 0x050505 })); slit.position.set(0, 1.5 + k * 0.07, -d / 2 - 0.045); g.add(slit); }
+    if (out) { const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.1, d + 0.3), stdMat({ map: TEX.roof })); roof.position.y = h + 0.05; roof.rotation.x = 0.12; g.add(roof); }
+    const hx = Math.abs(Math.cos(L.ry)) * w / 2 + Math.abs(Math.sin(L.ry)) * d / 2, hz = Math.abs(Math.sin(L.ry)) * w / 2 + Math.abs(Math.cos(L.ry)) * d / 2;
+    addBox(L.x - hx, L.z - hz, L.x + hx, L.z + hz, 'locker');
+    scene.add(reg(g));
+  });
 }
 
 function buildGenerator(i) {
@@ -814,6 +1007,22 @@ function buildGenerator(i) {
   world.gens.push({ group: g, lampMat, light, pos: genPos(i), shake: 0 });
 }
 
+// Relics exist only in Ritual matches; they're rebuilt from the host's list each match.
+function clearRelics() { for (const g of world.relics || []) { if (g) { unreg(g); scene.remove(g); } } world.relics = []; }
+function buildRelics() {
+  clearRelics();
+  OBJ.forEach((o, i) => {
+    if (o.kind !== 'relic') return;
+    const g = new THREE.Group(); g.position.set(o.x, 0, o.z);
+    const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.05, 1.0, 6), MAT.bark); stick.position.y = 0.5;
+    const skull = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), new THREE.MeshStandardMaterial({ color: 0x202830, emissive: 0x9fd8ff, emissiveIntensity: 2.2, roughness: 0.4 }));
+    skull.position.y = 1.15; skull.scale.set(1, 1.3, 1);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.015, 6, 20), new THREE.MeshStandardMaterial({ color: 0x101010, emissive: 0x6fb8ff, emissiveIntensity: 1.5 }));
+    ring.position.y = 1.15;
+    g.add(stick, skull, ring); g.userData.spin = [skull, ring];
+    reg(g, 'gen'); scene.add(g); world.relics[i] = g;
+  });
+}
 function buildWorld() {
   const rng = mulberry32(1337);
   MAT.bark = stdMat({ map: TEX.bark });
@@ -821,6 +1030,7 @@ function buildWorld() {
   MAT.rock = stdMat({ map: TEX.rock, roughness: 0.95 });
   MAT.bush = stdMat({ map: TEX.needles, color: 0x6f8a62 });
   MAT.fence = stdMat({ map: TEX.planks, color: 0x8a8070 });
+  MAT.metal = stdMat({ color: 0x3a4648, metalness: 0.7, roughness: 0.55 });
 
   // Ground and dirt paths
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND, GROUND), stdMat({ map: TEX.ground, roughness: 1 }));
@@ -841,6 +1051,7 @@ function buildWorld() {
   // Cabins and generators
   CABINS.forEach(buildCabin);
   GENS.forEach((_, i) => buildGenerator(i));
+  buildChapelExtras(CABINS.find((c) => c.chapel)); buildGraveyard(rng); buildTower(); buildStoneCircle(rng); buildTruck(); buildLamps(); buildLockers();
 
   // Campfire: stone ring, logs, flickering flames and light
   const fire = new THREE.Group(); fire.position.set(CAMPFIRE.x, 0, CAMPFIRE.z);
@@ -939,6 +1150,7 @@ function buildWorld() {
       geo.scale(1.2, 0.75, 1.2); geo.translate(x + (rng() - 0.5) * 1.2, r * 0.55, z + (rng() - 0.5) * 1.2);
       addToChunk('bush', geo, x, z);
     }
+    BUSHES.push([x, z]);
     n++;
   }
   flushChunks();
@@ -959,6 +1171,7 @@ function buildWorld() {
   const moonLight = new THREE.DirectionalLight(0x8fa3c8, 0.32); moonLight.position.set(-60, 100, -80); moonLight.target.position.set(AREA / 2, 0, AREA / 2);
   scene.add(moonLight, moonLight.target); survivorOnly.push(moonLight);
   scene.add(new THREE.HemisphereLight(0x3a4866, 0x0e0b07, 0.55));
+  buildAtmosphere(rng);
 
   buildNav();
   for (let z = 0; z < NAV_H; z++) for (let x = 0; x < NAV_W; x++) if (navBlocked[navIdx(x, z)] === 0 && z < (AREA - FENCE) * NAV_RES) NAV_FREE.push({ x, z });
@@ -1198,8 +1411,11 @@ function makeMonsterAvatar() {
     reg(g, 'entity');
     const bones = {};
     model.traverse((o) => { if (!o.isBone) return; for (const [k, re] of Object.entries(MONSTER_BONES)) if (re.test(o.name)) bones[k] = o; });
+    const eyeMat = new THREE.SpriteMaterial({ map: TEX.glow, color: 0xff2a14, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+    const eyes = [new THREE.Sprite(eyeMat), new THREE.Sprite(eyeMat)];
+    for (const e of eyes) { e.scale.setScalar(0.11); scene.add(e); survivorOnly.push(e); e.visible = viewMode !== 'monster'; }
     g.userData.monster = {
-      anim: makeMonsterAnimator(model), mats, meshes, bones, camo: 0, stillT: 0, look: 0, spasms: [], nextSpasm: time + 1 + Math.random() * 3,
+      eyes, anim: makeMonsterAnimator(model), mats, meshes, bones, camo: 0, stillT: 0, look: 0, spasms: [], nextSpasm: time + 1 + Math.random() * 3,
       bank: 0, pitch: 0, rateT: 0, rateTarget: 1, freeze: 0, owed: 0,
     };
     g.userData.rig = rig;
@@ -1269,6 +1485,12 @@ const sfx = {
   hit: () => { noise({ dur: 0.35, vol: 0.6, freq: 500, q: 0.6 }); tone({ f: 120, f2: 50, dur: 0.4, type: 'square', vol: 0.25 }); },
   gen: () => { tone({ f: 110, f2: 220, dur: 1.2, type: 'sawtooth', vol: 0.12 }); tone({ f: 660, dur: 0.3, vol: 0.12, delay: 0.9 }); },
   gate: () => { tone({ f: 60, f2: 90, dur: 2.5, type: 'sawtooth', vol: 0.15 }); noise({ dur: 2.5, vol: 0.12, freq: 200 }); },
+  clicks: (vol, pan) => { const n = 3 + Math.floor(Math.random() * 5); for (let i = 0; i < n; i++) noise({ dur: 0.025, vol: vol * (0.5 + Math.random() * 0.5), pan, freq: 1800 + Math.random() * 2600, q: 6, delay: i * (0.045 + Math.random() * 0.05) }); },
+  breath: (vol, pan) => { noise({ dur: 0.9, vol: vol * 0.5, pan, freq: 420, q: 0.7 }); noise({ dur: 1.1, vol: vol * 0.35, pan, freq: 260, q: 0.8, delay: 1.0 }); },
+  chase: (k) => { tone({ f: 52, f2: 46, dur: 0.22, type: 'sawtooth', vol: 0.16 * k }); noise({ dur: 0.08, vol: 0.12 * k, freq: 140, q: 0.8 }); },
+  sting: () => { for (const f of [311, 440, 466, 932]) tone({ f, f2: f * 1.03, dur: 1.1, type: 'sawtooth', vol: 0.07 }); noise({ dur: 0.5, vol: 0.3, freq: 3200, q: 0.8 }); },
+  howl: (vol, pan) => { tone({ f: 250, f2: 520, dur: 1.1, type: 'sine', vol, pan, attack: 0.4 }); tone({ f: 520, f2: 180, dur: 2.6, type: 'sine', vol: vol * 0.9, pan, delay: 1.0, attack: 0.1 }); tone({ f: 527, f2: 186, dur: 2.6, type: 'triangle', vol: vol * 0.4, pan, delay: 1.0 }); },
+  relic: () => { tone({ f: 660, f2: 990, dur: 0.5, type: 'sine', vol: 0.12 }); tone({ f: 1320, dur: 0.7, type: 'sine', vol: 0.06, delay: 0.15 }); },
   repair: () => noise({ dur: 0.06, vol: 0.06, freq: 2500 + Math.random() * 1500, q: 4 }),
   splash: (vol) => { noise({ dur: 0.25, vol: 0.18 + vol * 0.2, freq: 900 + Math.random() * 600, q: 0.5 }); noise({ dur: 0.12, vol: 0.1, freq: 3000, q: 1, delay: 0.05 }); },
   creak: (vol) => { tone({ f: 160 + Math.random() * 60, f2: 110, dur: 0.22, type: 'sawtooth', vol: 0.03 + vol * 0.05 }); noise({ dur: 0.08, vol: vol * 0.2, freq: 500, q: 1 }); },
@@ -1295,7 +1517,8 @@ function panOf(pos) {
 // ----------------------------------------------------------------------------
 const game = {
   phase: 'menu', // menu | lobby | playing | ended
-  gens: GENS.map(() => ({ progress: 0, done: false })),
+  mode: 'escape',
+  gens: GENS.map(() => ({ progress: 0, done: false })),   // one entry per objective in OBJ
   timeLeft: CFG.DURATION,
   gateOpen: false,
 };
@@ -1410,7 +1633,7 @@ function newHostPlayer(id, name, isMonster, isBot) {
   return { id, name, isMonster, isBot, x: 0, z: 0, ry: 0, n: 0, c: 0, r: 0, hp: CFG.MAX_HP, s: 'alive', lastHit: -99, lastAttack: -99, colorIdx: Object.keys(hs.players).length, bot: null };
 }
 function lobbyList() { return Object.values(hs.players).map((p) => ({ id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot })); }
-function broadcastLobby() { broadcast({ t: 'lobby', code: net.code, players: lobbyList() }); }
+function broadcastLobby() { broadcast({ t: 'lobby', code: net.code, mode: $('#mode-select').value, players: lobbyList() }); }
 
 function hostHandle(from, msg) {
   const p = hs.players[from];
@@ -1424,10 +1647,16 @@ function hostHandle(from, msg) {
     }
     case 'state': {
       if (!p || hs.phase !== 'playing' || p.s !== 'alive') return;
-      p.x = msg.x; p.z = msg.z; p.ry = msg.ry; p.n = clamp(+msg.n || 0, 0, 1); p.c = msg.c; p.r = msg.r;
+      p.x = msg.x; p.z = msg.z; p.ry = msg.ry; p.n = clamp(+msg.n || 0, 0, 1); p.c = msg.c; p.r = msg.r; p.h = msg.h ? 1 : 0;
       break;
     }
     case 'attack': hostAttack(p, msg.ry); break;
+    case 'throw': {
+      if (!p || p.isMonster || p.s !== 'alive' || hs.phase !== 'playing' || !(p.stones > 0)) return;
+      if (Math.hypot(msg.x - p.x, msg.z - p.z) > 20) return;
+      p.stones--; hs.pending.push({ t: time + 0.9, x: +msg.x, z: +msg.z });
+      break;
+    }
     case 'repair': hostRepair(p, msg.gen, msg.dt); break;
     case 'sonar': if (p?.isMonster) { hs.shriek = { x: p.x, z: p.z, t: time }; broadcast({ t: 'event', k: 'sonar', by: from, x: p.x, z: p.z }); } break;
     case 'escape': {
@@ -1458,28 +1687,36 @@ function hostAttack(m, ry) {
     if (s.isMonster || s.s !== 'alive') continue;
     const dx = s.x - m.x, dz = s.z - m.z, d = Math.hypot(dx, dz);
     if (d > CFG.ATTACK_RANGE) continue;
+    if (s.h && d > 1.9) continue;                              // hidden: it has to strike the locker itself
     if (d > 0.9 && (dx * fx + dz * fz) / d < 0.35) continue; // must be roughly in front
     if (d < bestD) { best = s; bestD = d; }
   }
-  if (!best || time - best.lastHit < CFG.HIT_INVULN) return;
-  best.lastHit = time; best.hp -= 1;
+  if (best) hostHit(m, best);
+}
+function hostHit(m, best) {
+  if (time - best.lastHit < CFG.HIT_INVULN) return;
+  best.lastHit = time; best.hp -= 1; best.h = 0;
   if (best.hp <= 0) { best.s = 'caught'; hs.lastKill = time; }
   broadcast({ t: 'event', k: 'hit', id: best.id, by: m.id, name: best.name, hp: best.hp, x: best.x, z: best.z });
 }
 function hostRepair(p, gi, dt) {
   if (!p || p.isMonster || p.s !== 'alive' || hs.phase !== 'playing') return;
   const g = hs.gens[gi];
-  if (!g || g.done) return;
-  const gp = genPos(gi);
+  if (!g || g.done || objLocked(gi, hs.gens)) return;
+  const gp = genPos(gi), kind = OBJ[gi].kind;
   if (Math.hypot(p.x - gp.x, p.z - gp.z) > 3.2) return;
-  g.progress = Math.min(1, g.progress + clamp(+dt || 0, 0, 0.5) / CFG.GEN_TIME);
+  // Generators and the altar take longer with more survivors, so team size stays fair.
+  const dur = kind === 'relic' ? 4 : (kind === 'altar' ? 18 : CFG.GEN_TIME) * hs.mult;
+  g.progress = Math.min(1, g.progress + clamp(+dt || 0, 0, 0.5) / dur);
   if (g.progress >= 1 && !g.done) {
     g.done = true;
-    broadcast({ t: 'event', k: 'gen', i: gi, x: gp.x, z: gp.z, left: hs.gens.filter((x) => !x.done).length });
-    if (hs.gens.every((x) => x.done) && !hs.gateOpen) {
+    const left = hs.gens.filter((x, k) => !x.done && OBJ[k].kind === kind).length;
+    broadcast({ t: 'event', k: 'gen', i: gi, kind, x: gp.x, z: gp.z, left });
+    if (kind === 'gen' && left === 0 && !hs.gateOpen) {
       hs.gateOpen = true;
       broadcast({ t: 'event', k: 'gate', x: GATE.x, z: GATE.z });
     }
+    if (kind === 'altar') hs.banished = true;
   }
 }
 function hostStart() {
@@ -1487,7 +1724,7 @@ function hostStart() {
   if (!list.some((p) => p.isMonster)) addFeed('Starting without a monster (testing mode).', 'warn');
   let si = 0;
   list.forEach((p, idx) => {
-    p.hp = CFG.MAX_HP; p.s = 'alive'; p.n = 0; p.c = 0; p.r = 0; p.lastHit = -99; p.lastAttack = -99; p.colorIdx = idx;
+    p.hp = CFG.MAX_HP; p.s = 'alive'; p.n = 0; p.c = 0; p.r = 0; p.h = 0; p.stones = 3; p.lastHit = -99; p.lastAttack = -99; p.colorIdx = idx;
     if (p.isMonster) { p.x = SPAWN_MON.x; p.z = SPAWN_MON.z; p.ry = Math.random() * Math.PI * 2; }
     else {
       const [sx, sz] = SPAWN_SURV[si % SPAWN_SURV.length]; si++;
@@ -1495,9 +1732,14 @@ function hostStart() {
     }
     p.bot = p.isBot ? newBrain(p) : null;
   });
-  hs.phase = 'playing'; hs.timeLeft = CFG.DURATION; hs.gateOpen = false; hs.lastKill = undefined;
-  hs.gens = GENS.map(() => ({ progress: 0, done: false }));
-  broadcast({ t: 'start', duration: CFG.DURATION, players: list.map((p) => ({ id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot, x: p.x, z: p.z, ry: p.ry, colorIdx: p.colorIdx })) });
+  hs.mode = MODES[$('#mode-select').value] ? $('#mode-select').value : 'escape';
+  OBJ = makeObjectives(hs.mode);
+  const nSurv = list.filter((p) => !p.isMonster).length;
+  hs.mult = [0.75, 0.75, 1, 1.2, 1.4][Math.min(nSurv, 4)];
+  hs.phase = 'playing'; hs.timeLeft = MODES[hs.mode].duration; hs.gateOpen = false; hs.lastKill = undefined;
+  hs.banished = false; hs.pending = []; hs.nextPulse = 40; hs.omen = false; hs.shriek = null;
+  hs.gens = OBJ.map(() => ({ progress: 0, done: false }));
+  broadcast({ t: 'start', mode: hs.mode, objs: OBJ, duration: hs.timeLeft, players: list.map((p) => ({ id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot, x: p.x, z: p.z, ry: p.ry, colorIdx: p.colorIdx })) });
 }
 function hostUpdate(dt) {
   if (hs.phase !== 'playing') return;
@@ -1518,8 +1760,32 @@ function hostUpdate(dt) {
     broadcast({
       t: 'snap', tl: r2(hs.timeLeft), go: hs.gateOpen,
       g: hs.gens.map((g) => r2(g.progress)),
-      p: Object.values(hs.players).map((p) => ({ id: p.id, x: r2(p.x), z: r2(p.z), ry: r2(p.ry), n: r2(p.n), c: p.c, r: p.r, hp: p.hp, s: p.s })),
+      p: Object.values(hs.players).map((p) => ({ id: p.id, x: r2(p.x), z: r2(p.z), ry: r2(p.ry), n: r2(p.n), c: p.c, r: p.r, h: p.h ? 1 : 0, hp: p.hp, s: p.s })),
     });
+  }
+
+  // Thrown stones land (a decoy noise the monster can hear)
+  for (const q of hs.pending.filter((q) => time >= q.t)) {
+    broadcast({ t: 'event', k: 'clack', x: q.x, z: q.z });
+    for (const m of Object.values(hs.players)) {
+      if (m.isMonster && m.bot && Math.hypot(m.x - q.x, m.z - q.z) < 0.8 * CFG.HEARING && Math.random() < 0.8) { m.bot.lead = { x: q.x, z: q.z, t: time }; if (m.bot.mode !== 'stalk') { m.bot.mode = 'stalk'; m.bot.goalKey = ''; } m.bot.listenT = 0; }
+    }
+  }
+  hs.pending = hs.pending.filter((q) => time < q.t);
+  // Last Light: every 40 s the moon exposes every survivor who isn't hidden.
+  if (hs.mode === 'survive') {
+    hs.nextPulse -= dt;
+    if (hs.nextPulse < 6 && !hs.omen) { hs.omen = true; broadcast({ t: 'event', k: 'omen' }); }
+    if (hs.nextPulse <= 0) {
+      hs.nextPulse = 40; hs.omen = false;
+      const seen = Object.values(hs.players).filter((p) => !p.isMonster && p.s === 'alive' && !p.h).map((p) => [r2(p.x), r2(p.z)]);
+      broadcast({ t: 'event', k: 'pulse', seen });
+      for (const m of Object.values(hs.players)) {
+        if (!m.isMonster || !m.bot || !seen.length) continue;
+        const near = seen.slice().sort((a, b) => Math.hypot(a[0] - m.x, a[1] - m.z) - Math.hypot(b[0] - m.x, b[1] - m.z))[0];
+        m.bot.lead = { x: near[0], z: near[1], t: time - 1.5 }; m.bot.mode = 'stalk'; m.bot.goalKey = ''; m.bot.listenT = 0;
+      }
+    }
   }
 
   // Win conditions
@@ -1529,7 +1795,11 @@ function hostUpdate(dt) {
   const caught = surv.filter((p) => p.s === 'caught').length;
   let end = null;
   if (surv.length > 0 && alive === 0) end = escaped > 0 ? { w: 'survivors', reason: `${escaped} escaped, ${caught} taken.` } : { w: 'monster', reason: 'Every survivor was taken.' };
-  else if (hs.timeLeft <= 0) end = alive + escaped > 0 ? { w: 'survivors', reason: `Dawn broke. ${alive + escaped} survived, ${caught} taken.` } : { w: 'monster', reason: 'Nobody made it.' };
+  else if (hs.banished) end = { w: 'survivors', reason: `The ritual is complete. It is gone. ${caught} taken.` };
+  else if (hs.timeLeft <= 0) {
+    if (hs.mode === 'ritual') end = { w: 'monster', reason: 'Dawn came and the ritual was never finished.' };
+    else end = alive + escaped > 0 ? { w: 'survivors', reason: `Dawn broke. ${alive + escaped} survived, ${caught} taken.` } : { w: 'monster', reason: 'Nobody made it.' };
+  }
   // Let a final kill animation and kill cam play out before showing the result.
   if (end && hs.lastKill !== undefined && time - hs.lastKill < KILL.end + 0.8) end = null;
   if (end) {
@@ -1685,14 +1955,25 @@ function updateSurvivorBot(p, dt) {
     if (inExit(p.x, p.z)) survivorEscapes(p);
     return;
   }
-  // Pick a generator: nearest, avoiding ones other bots are on and where the monster was last seen.
+  if (!OBJ.length) {
+    // Last Light: nothing to fix. Keep low and keep moving between quiet corners.
+    if (!b.path.length) {
+      let t = randomFloorTile();
+      for (let k = 0; k < 8; k++) { const c = tileCenter(t.x, t.z); if (Math.hypot(c.x - p.x, c.z - p.z) < 35) break; t = randomFloorTile(); }
+      b.goalKey = ''; botPathTo(p, b, t);
+    }
+    p.c = 1; p.n = CFG.NOISE.crouch;
+    if (botStep(p, b, CFG.SPEED.crouch, CFG.SURV_R, dt)) b.wait = 4 + Math.random() * 8;
+    return;
+  }
+  // Pick an objective: nearest, avoiding ones other bots are on and where the monster was last seen.
   let gi = -1, gd = Infinity, best = Infinity;
   const taken = new Set(Object.values(hs.players).filter((q) => q !== p && q.bot && !q.isMonster && q.s === 'alive').map((q) => q.bot.gen));
   hs.gens.forEach((g, i) => {
-    if (g.done) return;
+    if (g.done || objLocked(i, hs.gens)) return;
     const c = genPos(i), d = Math.hypot(c.x - p.x, c.z - p.z);
     const danger = recent ? Math.max(0, 20 - Math.hypot(c.x - b.mem.x, c.z - b.mem.z)) * 2 : 0;
-    const score = d + (taken.has(i) ? 40 : 0) + danger;
+    const score = d + (taken.has(i) && OBJ[i].kind !== 'altar' ? 40 : 0) + danger;
     if (score < best) { best = score; gd = d; gi = i; }
   });
   b.gen = gi;
@@ -1701,7 +1982,7 @@ function updateSurvivorBot(p, dt) {
     // Repairing hums (heard ~13 m away): don't do it while the monster was recently close.
     if (recent && memD < 16) { b.state = 'lurk'; p.n = 0; p.c = 1; if (b.mem) face(b.mem.x, b.mem.z); return; }
     b.state = 'work';
-    p.r = 1; p.c = 0; p.n = CFG.NOISE.repair;
+    p.r = 1; p.c = 0; p.n = OBJ_NOISE[OBJ[gi].kind];
     const c = genPos(gi);
     p.ry = Math.atan2(-(c.x - p.x), -(c.z - p.z));
     hostRepair(p, gi, dt * 0.6);
@@ -1725,6 +2006,7 @@ function updateMonsterBot(p, dt) {
     b.hearT = 0.2;
     let best = null, bestScore = -Infinity;
     for (const s of prey) {
+      if (s.h) continue; // hidden survivors make no sound
       const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * CFG.HEARING);
       if (d > radius) continue;
       if (radius - d > bestScore) { bestScore = radius - d; best = s; }
@@ -1740,6 +2022,7 @@ function updateMonsterBot(p, dt) {
   // ---- Strike anything within reach
   for (const s of prey) {
     const d = Math.hypot(s.x - p.x, s.z - p.z);
+    if (s.h && b.mode !== 'locker') continue; // it has to decide to check a hiding place
     if (d < 1.9 && b.attackCD <= 0) {
       const ry = Math.atan2(-(s.x - p.x), -(s.z - p.z));
       p.ry = ry; b.attackCD = CFG.ATTACK_CD + 0.3;
@@ -1770,6 +2053,20 @@ function updateMonsterBot(p, dt) {
     if (botStep(p, b, speed, CFG.MON_R, dt)) arriveAtLead(b);
     return;
   }
+  if (b.mode === 'locker') {
+    // Walk up to the hiding place and tear it open.
+    const L = LOCKERS[b.locker], f = lockerFront(L, 1.1);
+    botPathTo(p, b, tileOf(f.x, f.z));
+    const arrived = botStep(p, b, MON_SPEED.stalk, CFG.MON_R, dt) || Math.hypot(p.x - f.x, p.z - f.z) < 0.9;
+    if (arrived || !b.path.length) {
+      p.ry = Math.atan2(-(L.x - p.x), -(L.z - p.z));
+      if (b.attackCD <= 0) {
+        b.attackCD = CFG.ATTACK_CD + 0.3; hostAttack(p, p.ry);
+        b.mode = 'sweep'; b.sweep = 1; b.path = []; b.lead = b.lead || { x: p.x, z: p.z, t: time };
+      }
+    }
+    return;
+  }
   if (b.mode === 'sweep' && b.lead) {
     // Check a few spots around where it last heard something.
     if (!b.path.length) {
@@ -1791,15 +2088,24 @@ function updateMonsterBot(p, dt) {
     if (hs.gateOpen && Math.random() < 0.7) t = tileOf(GATE.x + (Math.random() - 0.5) * 16, AREA - FENCE - 4 - Math.random() * 14);
     else {
       const active = hs.gens.map((g, i) => [g, i]).filter(([g]) => !g.done && g.progress > 0.05);
-      if (active.length && Math.random() < 0.65) t = genApproach(active[Math.floor(Math.random() * active.length)][1]);
-      else t = Math.random() < 0.5 ? genApproach(Math.floor(Math.random() * GENS.length)) : randomFloorTile();
+      const ready = OBJ.findIndex((o, i) => o.kind === 'altar' && !objLocked(i, hs.gens));
+      if (ready >= 0 && Math.random() < 0.7) t = genApproach(ready);       // the ritual is ready: guard the circle
+      else if (active.length && Math.random() < 0.65) t = genApproach(active[Math.floor(Math.random() * active.length)][1]);
+      else t = OBJ.length && Math.random() < 0.5 ? genApproach(Math.floor(Math.random() * OBJ.length)) : randomFloorTile();
     }
     b.goalKey = ''; botPathTo(p, b, t);
     if (!b.path.length) { b.wait = 0.5; return; }
   }
   if (botStep(p, b, MON_SPEED.prowl, CFG.MON_R, dt)) b.wait = 0.5 + Math.random() * 1.5;
 }
-function arriveAtLead(b) { b.mode = 'search'; b.listenT = 2 + Math.random(); b.path = []; }
+function arriveAtLead(b) {
+  b.mode = 'search'; b.listenT = 2 + Math.random(); b.path = [];
+  if (b.lead && Math.random() < 0.4) {
+    const li = LOCKERS.findIndex((L) => Math.hypot(L.x - b.lead.x, L.z - b.lead.z) < 7);
+    if (li >= 0) { b.mode = 'locker'; b.locker = li; b.listenT = 0.8; b.goalKey = ''; }
+  }
+}
+const lockerFront = (L, d = 1.0) => ({ x: L.x - Math.sin(L.ry) * d, z: L.z - Math.cos(L.ry) * d });
 // Lost the trail: shriek if it can (every survivor within 26 m answers by being located),
 // otherwise sweep the area around the last sound.
 function shriekOrSweep(p, b, prey) {
@@ -1828,6 +2134,7 @@ function clientHandle(msg) {
 }
 function onLobby(msg) {
   lobbyPlayers = msg.players;
+  if (!net.isHost && msg.mode) { $('#mode-select').value = msg.mode; $('#mode-select').disabled = true; showModeDesc(); }
   if (game.phase === 'playing' || game.phase === 'ended') leaveMatch();
   game.phase = 'lobby';
   showScreen('menu');
@@ -1863,7 +2170,11 @@ function setMonster(id) {
 function onStart(msg) {
   leaveMatch();
   game.phase = 'playing'; game.timeLeft = msg.duration; game.gateOpen = false;
-  game.gens.forEach((g) => { g.progress = 0; g.done = false; });
+  game.mode = msg.mode || 'escape'; OBJ = msg.objs || OBJ;
+  game.gens = OBJ.map(() => ({ progress: 0, done: false }));
+  buildRelics();
+  me.hidden = -1; me.hideT = 0; me.hideCD = 0; me.stones = 3; me.throwCD = 0;
+  $('#hide-overlay').classList.add('hidden');
   for (const p of msg.players) {
     if (p.id === me.id) {
       me.isMonster = p.isMonster; me.pos.set(p.x, 0, p.z); me.yaw = p.ry; me.pitch = 0;
@@ -1881,7 +2192,13 @@ function onStart(msg) {
   $('#hud-survivor').classList.toggle('hidden', me.isMonster);
   $('#hud-monster').classList.toggle('hidden', !me.isMonster);
   initAudio(); startDrone(me.isMonster ? 'monster' : 'survivor');
-  addFeed(me.isMonster ? 'You are blind. Listen for the ripples. Hunt.' : 'Repair the generators. Stay quiet. Escape.', me.isMonster ? 'good' : 'warn');
+  const brief = {
+    escape: ['Repair the generators. Stay quiet. Escape.', 'They are fixing the generators. Stop them.'],
+    ritual: ['Find the five relics, then banish it at the stone circle.', 'They are gathering relics. Do not let them reach the stones.'],
+    survive: ['There is no way out. Hide, keep moving, and live until dawn.', 'None of them leave this forest. Dawn is coming.'],
+  }[game.mode];
+  addFeed(brief[me.isMonster ? 1 : 0], me.isMonster ? 'good' : 'warn');
+  if (!me.isMonster) addFeed('E hides you in lockers and outhouses. G throws a stone as a decoy.', '');
   updateResumeOverlay();
   lockPointer();
 }
@@ -1898,12 +2215,14 @@ function addRemote(p) {
 }
 function removeRemote(id) {
   const r = players.get(id); if (!r) return;
+  for (const e of r.avatar.userData.monster?.eyes || []) { scene.remove(e); const i = survivorOnly.indexOf(e); if (i >= 0) survivorOnly.splice(i, 1); }
   unreg(r.avatar); scene.remove(r.avatar);
   r.avatar.traverse((o) => { const i = survivorOnly.indexOf(o); if (i >= 0) survivorOnly.splice(i, 1); });
   players.delete(id);
 }
 function leaveMatch() {
   for (const id of [...players.keys()]) removeRemote(id);
+  clearRelics(); me.hidden = -1; $('#hide-overlay').classList.add('hidden');
   game.gateOpen = false;
   if (world.gate) world.gate.mesh.position.x = world.gate.x0;
 }
@@ -1911,7 +2230,7 @@ function onSnap(msg) {
   if (game.phase !== 'playing') return;
   game.timeLeft = msg.tl;
   game.gateOpen = msg.go;
-  msg.g.forEach((v, i) => { game.gens[i].progress = v; game.gens[i].done = v >= 1; });
+  msg.g.forEach((v, i) => { if (game.gens[i]) { game.gens[i].progress = v; game.gens[i].done = v >= 1; } });
   const seen = new Set();
   for (const s of msg.p) {
     seen.add(s.id);
@@ -1924,6 +2243,7 @@ function onSnap(msg) {
     const dying = r.anim && (r.anim.dead >= 0 || r.anim.deadDelay > 0);
     const killing = r.avatar.userData.monster?.anim.shot === 'jumpscare';
     if (!dying && !killing) { r.target.set(s.x, 0, s.z); r.targetYaw = s.ry; } r.noise = s.n; r.crouch = s.c; r.repairing = s.r; r.hp = s.hp;
+    if (r.hidden !== !!s.h) { r.hidden = !!s.h; if (r.status === 'alive' && !dying) r.avatar.visible = !r.hidden; }
     if (r.status !== s.s) {
       r.status = s.s;
       if (s.s === 'escaped') r.avatar.visible = false;
@@ -1973,6 +2293,7 @@ function onEvent(e) {
         victim.targetYaw = victim.yaw = Math.atan2(dx, dz); // forward (-Z) points back at the attacker
       }
       if (e.id === me.id) {
+        if (me.hidden >= 0) exitHide(true);
         me.damage = 1; me.boost = 3; sfx.hit();
         if (lethal) startKillCam(e.by); else { me.flinch = 1; addFeed('You are wounded! RUN.', 'bad'); }
       } else {
@@ -1992,12 +2313,34 @@ function onEvent(e) {
       break;
     }
     case 'gen': {
-      addRipple(pos.setY(1), 26, 1.4, 11);
-      world.gens[e.i].shake = 1;
-      startleMonsters(e.x, e.z, 25);
-      game.gens[e.i].done = true; game.gens[e.i].progress = 1;
-      sfx.gen();
-      addFeed(e.left > 0 ? `A generator roars to life. ${e.left} remaining.` : 'All generators online!', me.isMonster ? 'warn' : 'good');
+      if (game.gens[e.i]) { game.gens[e.i].done = true; game.gens[e.i].progress = 1; }
+      if (e.kind === 'relic') {
+        addRipple(pos.setY(1), 10, 0.9, 9); sfx.relic();
+        addFeed(e.left > 0 ? `A relic was taken. ${e.left} remaining.` : 'All relics found. The stone circle is awake!', me.isMonster ? 'warn' : 'good');
+      } else if (e.kind === 'altar') {
+        addRipple(pos.setY(1), 60, 2, 16); sfx.gate();
+      } else {
+        addRipple(pos.setY(1), 26, 1.4, 11);
+        if (world.gens[e.i]) world.gens[e.i].shake = 1;
+        startleMonsters(e.x, e.z, 25);
+        sfx.gen();
+        addFeed(e.left > 0 ? `A generator roars to life. ${e.left} remaining.` : 'All generators online!', me.isMonster ? 'warn' : 'good');
+      }
+      break;
+    }
+    case 'clack': {
+      // A thrown stone lands: the monster hears it like any other noise in range.
+      if ((me.isMonster || viewMode === 'monster') && me.pos.distanceTo(pos) < 0.8 * CFG.HEARING) addRipple(pos.setY(0.05), 12, 1.1);
+      noise({ dur: 0.07, vol: 0.5 * distVol(pos, 30), pan: panOf(pos), freq: 2200, q: 3 }); noise({ dur: 0.05, vol: 0.3 * distVol(pos, 30), pan: panOf(pos), freq: 1300, q: 3, delay: 0.16 });
+      break;
+    }
+    case 'omen': if (!me.isMonster) { addFeed('The moon is turning. In a few seconds it will expose everyone who is not hidden.', 'warn'); tone({ f: 220, f2: 440, dur: 2.5, type: 'sine', vol: 0.08 }); } break;
+    case 'pulse': {
+      fx.lightning = 1;
+      if (me.isMonster || viewMode === 'monster') for (const [x, z] of e.seen) addRipple(_v.set(x, 0.05, z), 7, 1.5, 6);
+      if (me.isMonster) addFeed(e.seen.length ? 'The moon shows them to you.' : 'The moon finds no one.', 'good');
+      else if (me.status === 'alive') { if (me.hidden >= 0) addFeed('The moonlight passes over your hiding place.', 'good'); else { me.damage = 0.5; addFeed('It saw where you are. Move!', 'bad'); } }
+      tone({ f: 90, f2: 45, dur: 1.2, type: 'sawtooth', vol: 0.12 });
       break;
     }
     case 'gate': {
@@ -2036,7 +2379,7 @@ function sendState(dt) {
   if (stateAcc < 1 / CFG.NET_HZ) return;
   stateAcc = 0;
   if (me.status !== 'alive') return;
-  sendToHost({ t: 'state', x: r2(me.pos.x), z: r2(me.pos.z), ry: r2(me.yaw), n: r2(me.noise), c: me.crouch ? 1 : 0, r: me.repairing ? 1 : 0 });
+  sendToHost({ t: 'state', x: r2(me.pos.x), z: r2(me.pos.z), ry: r2(me.yaw), n: r2(me.noise), c: me.crouch ? 1 : 0, r: me.repairing ? 1 : 0, h: me.hidden >= 0 ? 1 : 0 });
 }
 
 // ----------------------------------------------------------------------------
@@ -2059,6 +2402,8 @@ addEventListener('keydown', (e) => {
   if (game.phase !== 'playing') return;
   if (e.code === 'KeyF' && !me.isMonster) { flashlightOn = !flashlightOn; flashlight.visible = flashlightOn && viewMode === 'survivor'; tone({ f: 1800, dur: 0.03, vol: 0.05 }); }
   if (e.code === 'KeyQ') monsterSonar();
+  if (e.code === 'KeyE' && !e.repeat) toggleHide();
+  if (e.code === 'KeyG' && !e.repeat) throwStone();
   if (e.code === 'Space' && me.isMonster && !e.repeat) monsterAttack();
   if (e.code === 'KeyV' && !me.isMonster && me.status !== 'alive') setViewMode(viewMode === 'monster' ? 'survivor' : 'monster');
   if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -2118,6 +2463,37 @@ function endDrag(e) {
 }
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', (e) => { if (drag && e.pointerId === drag.id) drag = null; });
+// ---- Survivor tools: hiding and decoy stones
+function nearLocker() {
+  let best = 1.9, li = -1;
+  LOCKERS.forEach((L, i) => { const f = lockerFront(L, 0.8), d = Math.hypot(me.pos.x - f.x, me.pos.z - f.z); if (d < best) { best = d; li = i; } });
+  return li;
+}
+function toggleHide() {
+  if (me.isMonster || me.status !== 'alive' || me.killCam) return;
+  if (me.hidden >= 0) { exitHide(false); return; }
+  const li = nearLocker();
+  if (li < 0 || me.repairGen >= 0 || me.hideCD > 0) return;
+  if ([...players.values()].some((r) => r.hidden && Math.hypot(r.pos.x - LOCKERS[li].x, r.pos.z - LOCKERS[li].z) < 0.8)) { addFeed('Someone is already in there.', 'warn'); return; }
+  const L = LOCKERS[li];
+  me.hidden = li; me.pos.set(L.x, 0, L.z); me.yaw = L.ry; me.pitch = 0;
+  $('#hide-overlay').classList.remove('hidden');
+  noise({ dur: 0.18, vol: 0.12, freq: 400, q: 1 });
+}
+function exitHide(forced) {
+  if (me.hidden < 0) return;
+  const f = lockerFront(LOCKERS[me.hidden], 0.95);
+  me.pos.set(f.x, 0, f.z); me.hidden = -1; me.hideCD = HIDE_COOLDOWN;
+  $('#hide-overlay').classList.add('hidden');
+  noise({ dur: 0.2, vol: forced ? 0.4 : 0.12, freq: 350, q: 1 });
+}
+function throwStone() {
+  if (me.isMonster || me.status !== 'alive' || me.hidden >= 0 || !(me.stones > 0) || me.throwCD > 0) return;
+  me.stones--; me.throwCD = 1.5;
+  const d = 15, x = clamp(me.pos.x - Math.sin(me.yaw) * d, FENCE + 1, AREA - FENCE - 1), z = clamp(me.pos.z - Math.cos(me.yaw) * d, FENCE + 1, AREA - FENCE - 1);
+  noise({ dur: 0.25, vol: 0.12, freq: 1500, q: 0.6 });
+  sendToHost({ t: 'throw', x: r2(x), z: r2(z) });
+}
 function monsterAttack() {
   if (!me.isMonster || me.status !== 'alive' || me.attackCD > 0) return;
   me.attackCD = CFG.ATTACK_CD; me.lunge = 1;
@@ -2193,6 +2569,19 @@ function updateLocal(dt) {
   me.lunge = Math.max(0, me.lunge - dt * 4);
 
   if (me.killCam) { updateKillCam(dt); return; }
+  me.throwCD = Math.max(0, (me.throwCD || 0) - dt); me.hideCD = Math.max(0, (me.hideCD || 0) - dt);
+  if (me.hidden >= 0 && me.status === 'alive') {
+    // Inside a hiding place: silent and unseen, peering out through the slats.
+    const L = LOCKERS[me.hidden];
+    me.hideT += dt; me.noise = 0; me.repairing = false; me.moving = false; me.crouch = false;
+    let rel = me.yaw - L.ry; rel = ((rel + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    me.yaw = L.ry + clamp(rel, -0.7, 0.7); me.pitch = clamp(me.pitch, -0.4, 0.4);
+    me.eye = damp(me.eye, 1.45, 10, dt);
+    applyCamera(dt, 0);
+    if (me.hideT >= HIDE_MAX) { exitHide(true); addFeed('You burst out, gasping for air.', 'bad'); }
+    return;
+  }
+  me.hideT = Math.max(0, (me.hideT || 0) - dt * 1.5);
   me.flinch = Math.max(0, (me.flinch || 0) - dt * 3);
   const ctrl = controlsActive();
   let fx = 0, fz = 0;
@@ -2222,8 +2611,8 @@ function updateLocal(dt) {
   let nearGen = -1;
   if (!me.isMonster) {
     let best = 2.6;
-    GENS.forEach((G, i) => {
-      if (game.gens[i].done) return;
+    OBJ.forEach((G, i) => {
+      if (!game.gens[i] || game.gens[i].done || objLocked(i, game.gens)) return;
       const d = Math.hypot(me.pos.x - G.x, me.pos.z - G.z);
       if (d < best) { best = d; nearGen = i; }
     });
@@ -2260,7 +2649,7 @@ function updateLocal(dt) {
   }
 
   // ---- Noise (what the monster "sees")
-  me.noise = !moving ? (me.repairing ? CFG.NOISE.repair : 0) : me.crouch ? CFG.NOISE.crouch : me.sprint ? CFG.NOISE.sprint : CFG.NOISE.walk;
+  me.noise = !moving ? (me.repairing ? OBJ_NOISE[OBJ[nearGen].kind] : 0) : me.crouch ? CFG.NOISE.crouch : me.sprint ? CFG.NOISE.sprint : CFG.NOISE.walk;
   if (moving && wading) me.noise = Math.min(1, Math.max(0.45, me.noise * 1.8)); // splashing
   else if (moving && planks) me.noise = Math.min(1, me.noise * 1.3);           // creaking boards
 
@@ -2451,6 +2840,16 @@ function animateMonster(r, dt) {
   // (within 14 m) breaks it, and it never fades completely: a faint shimmer remains.
   const lit = inFlashlight(r.pos, 14);
   M.camo = M.stillT > 1.2 && !lit ? Math.min(1, M.camo + dt / 1.4) : Math.max(0, M.camo - dt / (lit ? 0.6 : 0.25));
+  // Its eyes: two red points that turn to you. They still glint faintly when it is hidden.
+  if (M.eyes && M.bones.head) {
+    M.bones.head.getWorldPosition(_lv);
+    _fl.subVectors(camera.position, _lv); const ed = _fl.length() || 1; _fl.divideScalar(ed);
+    const facing = clamp((_fl.x * -Math.sin(a.rotation.y) + _fl.z * -Math.cos(a.rotation.y)) * 1.6 + 0.5 + M.look, 0, 1);
+    const vis = r.status === 'alive' && viewMode === 'survivor' ? facing * (M.camo > 0.5 ? (ed < 16 ? 0.35 : 0) : 0.95) * (0.85 + 0.15 * Math.sin(time * 9)) : 0;
+    _v2.set(_fl.z, 0, -_fl.x).normalize();
+    M.eyes[0].material.opacity = vis;
+    M.eyes.forEach((e, i) => { e.position.copy(_lv).addScaledVector(_fl, 0.3).addScaledVector(_v2, i ? 0.075 : -0.075); e.position.y += 0.04; });
+  }
   const op = 1 - 0.9 * M.camo;
   for (const m of M.mats) m.opacity = op;
   for (const o of M.meshes) o.castShadow = M.camo < 0.3;
@@ -2513,7 +2912,7 @@ function updateViewBody(dt) {
 }
 
 function updateRemotes(dt) {
-  let monsterDist = Infinity, monsterPos = null;
+  let monsterDist = Infinity, monsterPos = null, mon = null;
   for (const r of players.values()) {
     const prev = _v.copy(r.pos);
     r.pos.x = damp(r.pos.x, r.target.x, 12, dt);
@@ -2528,7 +2927,7 @@ function updateRemotes(dt) {
 
     if (r.isMonster) {
       const d = r.pos.distanceTo(me.pos);
-      if (d < monsterDist) { monsterDist = d; monsterPos = r.pos; }
+      if (d < monsterDist) { monsterDist = d; monsterPos = r.pos; mon = r; }
       // Survivors hear the monster's heavy footfalls
       if (!me.isMonster && r.speed > 0.5) {
         r.stepT -= dt * r.speed;
@@ -2548,26 +2947,186 @@ function updateRemotes(dt) {
       }
     }
   }
-  return { monsterDist, monsterPos };
+  return { monsterDist, monsterPos, mon };
 }
 
 // ----------------------------------------------------------------------------
 //  WORLD ANIMATION, HUD, AMBIENCE
 // ----------------------------------------------------------------------------
+// ---- Atmosphere: sky, lightning, grass, fireflies, embers (survivor view only) ---------
+const atmo = { uTime: { value: 0 } };
+function pointCloud(positions, color, size, mode) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('aPhase', new THREE.Float32BufferAttribute(Array.from({ length: positions.length / 3 }, () => Math.random()), 1));
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: { uTime: atmo.uTime, uColor: { value: new THREE.Color(color) }, uSize: { value: size }, uMode: { value: mode } },
+    vertexShader: /* glsl */ `
+      attribute float aPhase; uniform float uTime; uniform float uSize; uniform float uMode; varying float vA;
+      void main() {
+        vec3 p = position; float t = uTime + aPhase * 40.0;
+        if (uMode < 0.5) {            // fireflies: drift and blink
+          p.x += sin(t * 0.5) * 0.9; p.y += sin(t * 0.9 + aPhase * 6.0) * 0.35; p.z += cos(t * 0.4) * 0.9;
+          vA = smoothstep(0.55, 1.0, sin(t * 1.3) * 0.5 + 0.5);
+        } else {                      // embers: rise, wander, die
+          float k = fract(t * 0.22); p.y += k * 3.6; p.x += sin(t * 2.0 + aPhase * 20.0) * 0.3 * k; p.z += cos(t * 1.7 + aPhase * 13.0) * 0.3 * k;
+          vA = (1.0 - k) * 0.9;
+        }
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        vA *= smoothstep(50.0, 22.0, -mv.z);
+        gl_PointSize = uSize * (300.0 / max(-mv.z, 0.5)); gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor; varying float vA;
+      void main() { float d = length(gl_PointCoord - 0.5); gl_FragColor = vec4(uColor * 2.5, smoothstep(0.5, 0.0, d) * vA); }`,
+  });
+  const pts = new THREE.Points(geo, mat); pts.frustumCulled = false;
+  scene.add(pts); survivorOnly.push(pts);
+  return pts;
+}
+function buildAtmosphere(rng) {
+  // Sky dome: deep gradient, moon halo, and a term lightning can light up
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(210, 32, 16), new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { uFlash: { value: 0 }, uMoon: { value: new THREE.Vector3(-90, 110, -120).normalize() }, uTime: atmo.uTime },
+    vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform float uFlash; uniform vec3 uMoon; uniform float uTime; varying vec3 vDir;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y); }
+      void main() {
+        vec3 d = normalize(vDir); float h = clamp(d.y, 0.0, 1.0);
+        vec3 col = mix(vec3(0.016, 0.024, 0.04), vec3(0.002, 0.004, 0.012), pow(h, 0.45));
+        float m = max(dot(d, uMoon), 0.0);
+        col += vec3(0.30, 0.36, 0.5) * pow(m, 90.0) * 0.5 + vec3(0.07, 0.09, 0.14) * pow(m, 7.0) * 0.5;
+        // slow drifting cloud banks that catch the moon and the lightning
+        vec2 uv = d.xz / (d.y + 0.25) * 1.6 + vec2(uTime * 0.004, 0.0);
+        float c = smoothstep(0.52, 0.85, vnoise(uv) * 0.6 + vnoise(uv * 2.7) * 0.4) * smoothstep(0.02, 0.3, h);
+        col = mix(col, vec3(0.02, 0.026, 0.04) + vec3(0.05, 0.06, 0.09) * pow(m, 3.0), c * 0.8);
+        col += vec3(0.55, 0.6, 0.78) * uFlash * (0.2 + 0.6 * c + 0.3 * (1.0 - h));
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  }));
+  sky.position.set(AREA / 2, 0, AREA / 2); sky.renderOrder = -2; scene.add(sky); survivorOnly.push(sky);
+  world.sky = sky;
+  const flash = new THREE.DirectionalLight(0xc8d6ff, 0); flash.position.set(40, 120, 60); flash.target.position.set(AREA / 2, 0, AREA / 2);
+  scene.add(flash, flash.target); survivorOnly.push(flash); world.flash = flash;
+
+  // Grass tufts (instanced, swaying)
+  const bladeTex = canvasTex(64, (g, s, r) => {
+    g.clearRect(0, 0, s, s);
+    for (let i = 0; i < 11; i++) {
+      const x = 6 + r() * (s - 12), lean = (r() - 0.5) * 18, h = s * (0.45 + r() * 0.5), v = 50 + r() * 50;
+      g.strokeStyle = `rgb(${v * 0.55},${v},${v * 0.45})`; g.lineWidth = 1.5 + r() * 1.5;
+      g.beginPath(); g.moveTo(x, s); g.quadraticCurveTo(x + lean * 0.3, s - h * 0.6, x + lean, s - h); g.stroke();
+    }
+  });
+  bladeTex.wrapS = bladeTex.wrapT = THREE.ClampToEdgeWrapping;
+  const q1 = new THREE.PlaneGeometry(0.6, 0.5); q1.translate(0, 0.25, 0); const q2 = q1.clone(); q2.rotateY(Math.PI / 2);
+  const grassMat = new THREE.MeshStandardMaterial({ map: bladeTex, alphaTest: 0.4, side: THREE.DoubleSide, color: 0x9db597, roughness: 1 });
+  grassMat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = atmo.uTime;
+    sh.vertexShader = 'uniform float uTime;\n' + sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n#ifdef USE_INSTANCING\n transformed.x += sin(uTime * 1.6 + instanceMatrix[3].x * 0.7 + instanceMatrix[3].z * 0.5) * 0.08 * position.y * 2.0;\n#endif');
+  };
+  const N = 6500, grass = new THREE.InstancedMesh(mergeGeometries([q1, q2]), grassMat, N), dummy = new THREE.Object3D();
+  let n = 0;
+  for (let i = 0; i < N * 4 && n < N; i++) {
+    const x = FENCE + 0.5 + rng() * (AREA - FENCE * 2 - 1), z = FENCE + 0.5 + rng() * (AREA - FENCE * 2 - 1);
+    if (keepClear(x, z, -1.2)) continue;
+    dummy.position.set(x, 0, z); dummy.rotation.y = rng() * Math.PI; dummy.scale.setScalar(0.7 + rng() * 0.9); dummy.updateMatrix();
+    grass.setMatrixAt(n++, dummy.matrix);
+  }
+  grass.count = n; grass.frustumCulled = false; grass.receiveShadow = true;
+  scene.add(grass); survivorOnly.push(grass);
+
+  // Fireflies along the creek and in the brush; embers over the campfire
+  const ff = [];
+  for (let i = 0; i < 170; i++) {
+    let x, z;
+    if (i % 2) { const b = BUSHES[Math.floor(rng() * BUSHES.length)] || [60, 60]; x = b[0] + (rng() - 0.5) * 5; z = b[1] + (rng() - 0.5) * 5; }
+    else { const k = Math.floor(rng() * (CREEK.length - 1)), t = rng(); x = lerp(CREEK[k][0], CREEK[k + 1][0], t) + (rng() - 0.5) * 9; z = lerp(CREEK[k][1], CREEK[k + 1][1], t) + (rng() - 0.5) * 9; }
+    ff.push(x, 0.5 + rng() * 1.5, z);
+  }
+  pointCloud(ff, 0xc8ff70, 0.11, 0);
+  const em = [];
+  for (let i = 0; i < 46; i++) em.push(CAMPFIRE.x + (rng() - 0.5) * 0.5, 0.5, CAMPFIRE.z + (rng() - 0.5) * 0.5);
+  pointCloud(em, 0xff8a30, 0.09, 1);
+  // Moving water
+  if (world.water) {
+    const wn = canvasTex(128, (g, s, r) => { for (let y = 0; y < s; y += 4) for (let x = 0; x < s; x += 4) { g.fillStyle = `rgb(${128 + (r() - 0.5) * 70},${128 + (r() - 0.5) * 70},255)`; g.fillRect(x, y, 4, 4); } });
+    wn.colorSpace = THREE.NoColorSpace;
+    world.water.material.normalMap = wn; world.water.material.normalScale = new THREE.Vector2(0.5, 0.5); world.waterN = wn;
+  }
+}
+// The thing in the dark: what a survivor hears and sees as it gets close.
+const scare = { clickT: 2, breathT: 0, chase: 0, chaseT: 0, lastSting: -99, howlT: 20 };
+function updateScares(dt, d, mon) {
+  // Lightning and thunder
+  fx.nextLightning -= dt;
+  if (fx.nextLightning <= 0 && viewMode === 'survivor' && game.phase === 'playing') {
+    fx.nextLightning = 22 + Math.random() * 45; fx.lightning = 1;
+    noise({ dur: 3.2, vol: 0.35, freq: 110, q: 0.4, type: 'lowpass', delay: 0.5 + Math.random() * 1.8 });
+  }
+  fx.lightning = Math.max(0, fx.lightning - dt * 2.2);
+  const fl = fx.lightning > 0.02 ? fx.lightning * (0.55 + 0.45 * Math.sin(time * 47)) : 0;
+  if (world.flash) world.flash.intensity = fl * 4;
+  if (world.sky) world.sky.material.uniforms.uFlash.value = fl;
+  survivorPost.pass.uniforms.uFlash.value = fl;
+  if (world.waterN) world.waterN.offset.y -= dt * 0.12;
+
+  if (me.isMonster || me.status !== 'alive' || !mon || mon.status !== 'alive' || game.phase !== 'playing') { if (!me.killCam) flashlight.intensity = 45; return; }
+  const M = mon.avatar.userData.monster, pan = panOf(mon.pos), hiddenMon = M ? M.camo > 0.6 : false;
+  // Wet clicking as it moves; breathing when it is very close
+  scare.clickT -= dt;
+  if (d < 22 && scare.clickT <= 0) { scare.clickT = 0.4 + Math.random() * 2.4 * (d / 22 + 0.15); sfx.clicks(distVol(mon.pos, 24) * 0.6, pan); }
+  scare.breathT -= dt;
+  if (d < 9 && scare.breathT <= 0) { scare.breathT = 2.3; sfx.breath(distVol(mon.pos, 10) * 0.6, pan); }
+  // Pulse when it is charging you
+  const chasing = mon.speed > 4.3 && d < 16;
+  scare.chase = damp(scare.chase, chasing ? 1 : 0, chasing ? 4 : 0.7, dt);
+  scare.chaseT -= dt;
+  if (scare.chase > 0.3 && scare.chaseT <= 0) { scare.chaseT = 0.3; sfx.chase(scare.chase); }
+  // A stab of sound the moment you actually see it up close
+  if (d < 10 && !hiddenMon && time - scare.lastSting > 18) {
+    camera.getWorldDirection(_v2); _fl.subVectors(mon.pos, camera.position).normalize();
+    if (_v2.dot(_fl) > 0.6) { scare.lastSting = time; sfx.sting(); }
+  }
+  // Far-off howl: a rough bearing on where it is
+  scare.howlT -= dt;
+  if (scare.howlT <= 0) { scare.howlT = 30 + Math.random() * 40; if (d > 22) sfx.howl(0.12 + 0.3 * distVol(mon.pos, 150), pan); }
+  // Your flashlight falters as it closes in (a warning, even when you can't see it)
+  const near = clamp(1 - d / 11, 0, 1);
+  if (!me.killCam) flashlight.intensity = 45 * (near > 0 ? (Math.random() < near * 0.22 ? 0.04 : 1 - near * 0.45 * Math.random()) : 1);
+}
+
 let heartT = 0;
-function updateWorld(dt, monsterDist) {
+function updateWorld(dt, monsterDist, mon) {
+  atmo.uTime.value = time;
+  updateScares(dt, monsterDist, mon);
   // Firelight and cabin lamps flicker
   for (const l of world.flickers) {
     const k = l.kind === 'fire'
       ? 0.75 + Math.sin(time * 9 + l.phase) * 0.12 + Math.sin(time * 23.7) * 0.08 + Math.random() * 0.08
       : 0.9 + Math.sin(time * 31 + l.phase) * 0.04 + (Math.sin(time * 2.3 + l.phase) > 0.97 ? -0.5 : 0);
-    l.light.intensity = l.base * k;
+    const kk = l.kind === 'dying' ? k * (Math.sin(time * 1.7) > 0.2 ? (Math.random() < 0.85 ? 1 : 0.1) : 0.04) : k;
+    l.light.intensity = l.base * kk;
+    if (l.mat) l.mat.emissiveIntensity = 3 * kk;
   }
+  if (world.search) {
+    const a = time * 0.22, tx = TOWER.x + Math.cos(a) * 34, tz = TOWER.z + Math.sin(a) * 34;
+    world.search.light.target.position.set(tx, 0, tz); world.search.cone.lookAt(tx, 0, tz);
+  }
+  if (world.truckLamp) world.truckLamp.emissiveIntensity = Math.sin(time * 0.9) > 0.6 ? 1.5 + Math.random() : 0.05;
   if (world.mist) { for (const w of world.mist) w.m.position.x = w.x + Math.sin(time * 0.07 + w.phase) * 2.5; if (world.mist[0]) world.mist[0].m.material.opacity = 0.5 + Math.sin(time * 0.2) * 0.1; }
   if (world.fire) world.fire.flames.forEach((f, i) => { f.scale.set(1, 0.8 + Math.sin(time * 11 + i * 2) * 0.25 + Math.random() * 0.1, 1); f.rotation.y = time * (1 + i); });
   // Generators
+  const idle = { done: false, progress: 0 };
   world.gens.forEach((g, i) => {
-    const s = game.gens[i];
+    const s = game.mode === 'escape' && game.gens[i] ? game.gens[i] : idle;
+    g.light.visible = game.mode === 'escape' && viewMode === 'survivor';
     const col = s.done ? 0x2bff6a : s.progress > 0 ? 0xffa020 : 0xff2200;
     g.lampMat.emissive.setHex(col); g.light.color.setHex(col);
     g.light.intensity = s.done ? 4 : 2.5 + Math.sin(time * 6) * 0.5;
@@ -2576,6 +3135,18 @@ function updateWorld(dt, monsterDist) {
     g.group.position.x = g.pos.x + (running ? Math.sin(time * 60) * 0.006 : 0) + Math.sin(time * 80) * g.shake * 0.04;
   });
   // Gate
+  // Relics hover and turn until taken; the altar's runes brighten as they're found.
+  (world.relics || []).forEach((g, i) => {
+    if (!g) return;
+    g.visible = !game.gens[i]?.done;
+    g.userData.spin[0].rotation.y = time * 1.2; g.userData.spin[0].position.y = 1.15 + Math.sin(time * 2 + i) * 0.05;
+    g.userData.spin[1].rotation.x = time * 0.9; g.userData.spin[1].rotation.y = time * 0.5;
+  });
+  if (world.altar) {
+    const n = OBJ.filter((o) => o.kind === 'relic').length, a = OBJ.filter((o, i) => o.kind === 'relic' && game.gens[i]?.done).length;
+    const k = game.mode === 'ritual' && game.phase === 'playing' && n ? a / n : 0;
+    world.altar.emissiveIntensity = k * (k >= 1 ? 3 + Math.sin(time * 5) : 1.2);
+  }
   // Gate slides aside when all generators are running
   if (world.gate) world.gate.mesh.position.x = damp(world.gate.mesh.position.x, world.gate.x0 + (game.gateOpen ? GATE.w + 0.2 : 0), 0.8, dt);
   if (world.exitLight) world.exitLight.color.setHex(game.gateOpen ? 0x2cff70 : 0xff2a10);
@@ -2594,8 +3165,12 @@ function updateWorld(dt, monsterDist) {
 }
 function updateHUD() {
   $('#hud-timer').textContent = fmtTime(game.timeLeft);
-  const left = game.gens.filter((g) => !g.done).length;
-  $('#hud-objective').textContent = game.gateOpen ? 'EXIT GATE OPEN' : `Generators ${game.gens.length - left}/${game.gens.length}`;
+  const count = (kind) => [OBJ.filter((o, i) => o.kind === kind && game.gens[i]?.done).length, OBJ.filter((o) => o.kind === kind).length];
+  let objective;
+  if (game.mode === 'ritual') { const [a, n] = count('relic'); objective = a < n ? `Relics ${a}/${n}` : 'BANISH IT AT THE STONE CIRCLE'; }
+  else if (game.mode === 'survive') objective = 'Survive until dawn';
+  else { const [a, n] = count('gen'); objective = game.gateOpen ? 'EXIT GATE OPEN' : `Generators ${a}/${n}`; }
+  $('#hud-objective').textContent = objective;
   let prompt = '';
   if (me.status !== 'alive' && !me.isMonster && !me.killCam) prompt = `Spectating · WASD fly · Space/C up/down · V ${viewMode === 'monster' ? 'normal' : 'monster'} vision`;
   if (me.isMonster) {
@@ -2611,8 +3186,14 @@ function updateHUD() {
     $('#stamina-fill').style.width = `${me.stamina * 100}%`;
     $('#stamina-fill').style.background = me.exhausted ? '#ff3b3b' : '';
     $('#noise-fill').style.width = `${me.noise * 100}%`;
+    $('#stone-count').textContent = me.stones ?? 0;
+    $('#breath-row').classList.toggle('hidden', !(me.hidden >= 0 || me.hideT > 0.2));
+    $('#breath-fill').style.width = `${(1 - (me.hideT || 0) / HIDE_MAX) * 100}%`;
     if (me.status === 'alive') {
-      if (me.repairGen >= 0) prompt = `${me.repairing ? 'Repairing' : 'Hold E to repair'} — ${Math.floor(game.gens[me.repairGen].progress * 100)}%`;
+      const verb = { gen: ['Repairing', 'Hold E to repair'], relic: ['Taking the relic', 'Hold E to take the relic'], altar: ['Banishing', 'Hold E to begin the banishing'] };
+      if (me.hidden >= 0) prompt = 'Hidden. Hold your breath. E to step out.';
+      else if (me.repairGen >= 0) prompt = `${verb[OBJ[me.repairGen].kind][me.repairing ? 0 : 1]} — ${Math.floor(game.gens[me.repairGen].progress * 100)}%`;
+      else if (nearLocker() >= 0) prompt = me.hideCD > 0 ? `Catching your breath (${Math.ceil(me.hideCD)}s)` : 'Press E to hide';
       else if (game.gateOpen && !inExit(me.pos.x, me.pos.z)) prompt = 'The gate is open: get to the road south of the camp.';
     }
   }
@@ -2654,8 +3235,9 @@ function showScreen(which) {
 }
 function menuStatus(text, err) { const s = $('#menu-status'); s.textContent = text; s.classList.toggle('err', !!err); }
 function fatal(msg) { game.phase = 'menu'; unlockPointer(); $('#fatal-msg').textContent = msg; $('#fatal').classList.remove('hidden'); }
-function readName() { me.name = ($('#name-input').value.trim() || 'Survivor').slice(0, 16); try { localStorage.setItem('blindsight-name', me.name); } catch (e) { /* storage unavailable */ } }
-try { $('#name-input').value = localStorage.getItem('blindsight-name') || ''; } catch (e) { /* storage unavailable */ }
+const STORE = 'blindsight:'; // every storage key carries the app's prefix (shared-origin hosts)
+function readName() { me.name = ($('#name-input').value.trim() || 'Survivor').slice(0, 16); try { localStorage.setItem(STORE + 'name', me.name); } catch (e) { /* storage unavailable */ } }
+try { $('#name-input').value = localStorage.getItem(STORE + 'name') || ''; } catch (e) { /* storage unavailable */ }
 
 $('#btn-host').onclick = () => { initAudio(); readName(); hostCreate(false); };
 $('#btn-offline').onclick = () => { quickRole = null; initAudio(); readName(); hostCreate(true); };
@@ -2698,13 +3280,16 @@ $('#btn-lobby').onclick = () => hostBackToLobby();
 // Offline only: drop back to the main menu without a page reload.
 function backToMenu() {
   leaveMatch();
-  game.phase = 'menu'; net.isHost = false; net.offline = false; quickRole = null;
+  game.phase = 'menu'; net.isHost = false; net.offline = false; quickRole = null; $('#mode-select').disabled = false;
   hs.phase = 'lobby'; hs.players = {};
   clearRipples(); setViewMode('monster'); startDrone(null);
   showScreen('menu');
   $('#menu-main').classList.remove('hidden'); $('#menu-lobby').classList.add('hidden');
 }
 $('#btn-menu').onclick = backToMenu;
+function showModeDesc() { $('#mode-desc').textContent = MODES[$('#mode-select').value]?.desc || ''; }
+$('#mode-select').onchange = () => { showModeDesc(); if (net.isHost && hs.phase === 'lobby' && game.phase === 'lobby') broadcastLobby(); };
+showModeDesc();
 $('#btn-lobby-menu').onclick = backToMenu;
 $('#btn-rematch').onclick = () => playVsBots(quickRole);
 
@@ -2749,14 +3334,14 @@ function animate() {
 
   if (game.phase === 'playing' || game.phase === 'ended') {
     if (game.phase === 'playing') updateLocal(dt);
-    const { monsterDist } = updateRemotes(dt);
+    const { monsterDist, mon } = updateRemotes(dt);
     updateViewBody(dt);
-    updateWorld(dt, monsterDist);
+    updateWorld(dt, monsterDist, mon);
     if (net.isHost) hostUpdate(dt);
     if (game.phase === 'playing') { sendState(dt); updateHUD(); }
   } else {
     updateLobbyCamera(dt);
-    updateWorld(dt, Infinity);
+    updateWorld(dt, Infinity, null);
   }
 
   sonarShared.uCamPos.value.copy(camera.position);

@@ -12,7 +12,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
-  font-family: "Courier New", ui-monospace, monospace; }
+  font-family: 'Share Tech Mono', "Courier New", ui-monospace, monospace; }
 canvas#game { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .hidden { display: none !important; }
 
@@ -106,3 +106,16 @@ kbd { border: 1px solid var(--line); padding: 0 4px; font-size: 11px; background
 #fatal button { display: block; margin: 12px auto 0; }
 .end-actions { justify-content: center; margin-top: 12px; }
 #btn-lobby-menu { margin-top: 8px; }
+
+select { background: #0b110e; border: 1px solid var(--line); color: var(--text); padding: 10px 12px; font: inherit; outline: none; }
+select:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+select:disabled { opacity: 0.6; }
+.mode-desc { margin: -6px 0 12px; min-height: 2.6em; }
+/* Peering out through the slats of a hiding place */
+#hide-overlay { position: fixed; inset: 0; z-index: 4; pointer-events: none;
+  background:
+    linear-gradient(to right, rgba(0,0,0,0.98) 0 22%, transparent 22% 78%, rgba(0,0,0,0.98) 78% 100%),
+    linear-gradient(to bottom, rgba(0,0,0,0.98) 0 30%, transparent 30% 62%, rgba(0,0,0,0.98) 62% 100%),
+    repeating-linear-gradient(to bottom, rgba(0,0,0,0.97) 0 34px, transparent 34px 44px); }
+
+.title { font-family: 'Orbitron', 'Share Tech Mono', "Courier New", monospace; }

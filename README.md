@@ -24,6 +24,22 @@ The game is published to **GitHub Pages** by `.github/workflows/pages.yml` on ev
 3. Opening the link joins the room automatically, with no code to type. The 5-character Room ID still works with **Join** too.
 4. The host picks the monster (or **Random monster**), can fill empty seats with **Add bot survivor** / **Add bot monster**, and clicks **Start game**.
 
+## Game modes
+Pick the mode in the menu (the host picks for an online room).
+
+| Mode | Survivors win by | Monster wins by |
+|---|---|---|
+| **Escape** | Repairing 3 generators, opening the gate and getting out, or lasting 5:00 until dawn | Taking everyone |
+| **Ritual** | Finding 5 relics (random spots each match), then banishing it at the stone circle (a long, loud channel) | Taking everyone, or dawn arriving at 6:00 with the ritual unfinished |
+| **Last Light** | Staying alive for 3:20. Every 40 s the moon exposes everyone who isn't hidden | Taking everyone |
+
+Generators and the altar take longer with more survivors, so team size stays fair.
+
+### Survivor tools
+- **Hide (E):** step into a locker or outhouse. You make no sound and can't be seen or exposed, for up to 15 s of held breath (8 s to recover). The monster can still tear a hiding place open if it strikes it.
+- **Stones (G):** three per match. A stone lands 15 m ahead and clacks, a decoy noise the monster hears like any other.
+- **Warnings:** your flashlight falters when it is within 11 m, you hear its clicking and breathing, a pulse when it charges, and a far-off howl now and then that gives its rough bearing. Its red eyes still glint faintly when it's camouflaged.
+
 ## How to play
 
 | | Survivors | Monster |
@@ -52,6 +68,9 @@ A fenced, 120 m square of night forest:
   - **Wading:** slow (60% speed, 80% for the monster) and loud: splashing counts as noise even when crouched.
   - **Bridges:** broken plank bridges carry the paths over it. They're the quiet way across, though their boards creak a little.
   - **Bots** always use the bridges.
+- **Landmarks:** a chapel with a steeple and graveyard, a ranger watchtower with a sweeping searchlight, a ring of standing stones with an altar, a wrecked truck by the gate, and lamp posts along the paths (one is dying).
+- **Hiding places:** lockers in the cabins and chapel, and two outhouses.
+- **Atmosphere:** drifting clouds across a moonlit sky, lightning and thunder, swaying grass, fireflies, campfire embers, moving water, bloom and colour grading.
 - **Exit:** the gate is in the south fence. Once all three generators run, it slides open and the road beyond it is the way out.
 
 **Camouflage:**
@@ -131,6 +150,9 @@ Notes:
   - **Kill choreography:** the monster and victim turn to face each other, and the victim is drawn into reach. The victim's kill cam rides the model's own jumpscare **camera bone**, staring into its face (kept at least 1.1 m away), and the match result waits for it to finish.
 - **Survivor animation:** the walk/idle clips are blended by speed. Crouch, sprint lean, repairing, hit flinch and the death fall are layered on top as procedural bone rotations.
 
+## IDEA Foundry build
+`python3 tools/build-foundry.py` writes `foundry/` (the upload folder) and `blindsight-foundry.zip`, then checks them against the Foundry build contract: allowed file types only, relative paths, the storage snippet first in `<head>`, and prefixed storage keys (`blindsight:`). `game.js` is inlined into `index.html` so the page also opens straight from the filesystem. Opened that way, browsers block loading the model files, so the game runs with simple stand-in characters.
+
 ## Playtest build (Claude artifact)
 `play.html` is an embeddable copy of the page used to publish a playtest build as a Claude artifact. Regenerate it after editing `index.html`:
 
@@ -145,4 +167,4 @@ The artifact host serves only web file types, so the build wraps each `.glb` as 
 - `style.css`: the UI styling.
 - `game.js`: everything else, including the map, rendering, shaders, model loading, networking, gameplay, audio and bot AI.
 - `play.html`: the generated artifact build (see above).
-- `tools/`: `build-play.py` (artifact build) and `optimize-models.sh` (texture compression for the models).
+- `tools/`: `build-foundry.py` (IDEA Foundry upload folder), `build-play.py` (artifact build) and `optimize-models.sh` (texture compression for the models).
