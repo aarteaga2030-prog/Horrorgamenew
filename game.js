@@ -2729,7 +2729,7 @@ function updateLocal(dt) {
 
   // ---- Movement modes & stamina
   const moving = len > 0;
-  me.crouch = !me.isMonster && ctrl && (keys.KeyC || keys.ControlLeft);
+  me.crouch = !me.isMonster && ctrl && keys.KeyC; // C only: Ctrl+W closes the browser tab
   const wantSprint = ctrl && (keys.ShiftLeft || keys.ShiftRight) && moving && !me.crouch;
   if (me.stamina <= 0) me.exhausted = true;
   if (me.exhausted && me.stamina > 0.35) me.exhausted = false;
