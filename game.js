@@ -26,7 +26,8 @@ const CFG = {
   ATTACK_CD: 1.6,
   SONAR_CD: 20,
   SONAR_RANGE: 24,
-  HEARING: 24,            // metres a full-volume noise carries (the monster hears noise x this)
+  HEARING: Infinity,      // a human monster hears any noise, anywhere on the map (silence is the only cover)
+  BOT_HEARING: 24,        // the bot monster hears noise x this many metres, so bot matches stay winnable
   HIT_INVULN: 2.5,
   MAX_HP: 2,
   MAX_RIPPLES: 48,
@@ -1768,7 +1769,7 @@ function hostUpdate(dt) {
   for (const q of hs.pending.filter((q) => time >= q.t)) {
     broadcast({ t: 'event', k: 'clack', x: q.x, z: q.z });
     for (const m of Object.values(hs.players)) {
-      if (m.isMonster && m.bot && Math.hypot(m.x - q.x, m.z - q.z) < 0.8 * CFG.HEARING && Math.random() < 0.8) { m.bot.lead = { x: q.x, z: q.z, t: time }; if (m.bot.mode !== 'stalk') { m.bot.mode = 'stalk'; m.bot.goalKey = ''; } m.bot.listenT = 0; }
+      if (m.isMonster && m.bot && Math.hypot(m.x - q.x, m.z - q.z) < 0.8 * CFG.BOT_HEARING && Math.random() < 0.8) { m.bot.lead = { x: q.x, z: q.z, t: time }; if (m.bot.mode !== 'stalk') { m.bot.mode = 'stalk'; m.bot.goalKey = ''; } m.bot.listenT = 0; }
     }
   }
   hs.pending = hs.pending.filter((q) => time < q.t);
@@ -2007,7 +2008,7 @@ function updateMonsterBot(p, dt) {
     let best = null, bestScore = -Infinity;
     for (const s of prey) {
       if (s.h) continue; // hidden survivors make no sound
-      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * CFG.HEARING);
+      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * CFG.BOT_HEARING);
       if (d > radius) continue;
       if (radius - d > bestScore) { bestScore = radius - d; best = s; }
     }
@@ -2330,7 +2331,7 @@ function onEvent(e) {
     }
     case 'clack': {
       // A thrown stone lands: the monster hears it like any other noise in range.
-      if ((me.isMonster || viewMode === 'monster') && me.pos.distanceTo(pos) < 0.8 * CFG.HEARING) addRipple(pos.setY(0.05), 12, 1.1);
+      if (me.isMonster || viewMode === 'monster') addRipple(pos.setY(0.05), 12, 1.1);
       noise({ dur: 0.07, vol: 0.5 * distVol(pos, 30), pan: panOf(pos), freq: 2200, q: 3 }); noise({ dur: 0.05, vol: 0.3 * distVol(pos, 30), pan: panOf(pos), freq: 1300, q: 3, delay: 0.16 });
       break;
     }
@@ -2935,14 +2936,13 @@ function updateRemotes(dt) {
       }
     } else if (me.isMonster || viewMode === 'monster') {
       // ===== ECHOLOCATION: survivor noise → sonar ripples on the monster's grid
-      const inEarshot = !me.isMonster || r.pos.distanceTo(me.pos) < Math.max(1.6, r.noise * CFG.HEARING);
-      if (r.noise > 0.01 && inEarshot) {
+      if (r.noise > 0.01) {
         r.stepT -= dt;
         if (r.stepT <= 0) {
           const n = r.noise;
           r.stepT = lerp(0.95, 0.32, n) * (r.repairing ? 1.4 : 1);
           addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 2.2 + n * 11, 0.3 + n * 0.95);
-          if (me.isMonster) sfx.blip(distVol(r.pos, 50) * (0.3 + n), panOf(r.pos));
+          if (me.isMonster) sfx.blip(Math.max(0.15, distVol(r.pos, 60)) * (0.3 + n), panOf(r.pos)); // faint but audible at any range
         }
       }
     }

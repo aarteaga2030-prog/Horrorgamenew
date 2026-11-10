@@ -54,7 +54,7 @@ Generators and the altar take longer with more survivors, so team size stays fai
 ### Balance
 Survivors can outplay a human monster:
 - **Speed:** the monster walks slower than a survivor (3.9 vs 3.4 walk, but survivors sprint at 6.0 against its 5.6 charge). Its charge lasts 2.5 s against a survivor's 5 s sprint, and its stamina recovers more slowly.
-- **Hearing range:** the monster only hears noise in range, the same rule as the bot. Sprinting carries ~24 m, walking ~12 m, crouching ~3.6 m. Noise beyond that never appears on its screen.
+- **Hearing:** a human monster hears any noise from anywhere on the map. Louder movement makes bigger, more frequent ripples; only standing still, hiding, or a thrown stone elsewhere covers you. The bot monster is limited to range (sprinting ≈ 24 m, walking ≈ 12 m, crouching ≈ 3.6 m), because with unlimited hearing it took every bot survivor in every test match.
 - **Strike:** reach 2.3 m and a 1.6 s cooldown. After a hit, the survivor gets a 3 s speed boost and 2.5 s of invulnerability.
 - **Shriek:** reaches 24 m, on a 20 s cooldown.
 - **Camouflage:** builds only after 1.2 s of stillness, never goes fully invisible (a faint shimmer remains), and a survivor's flashlight beam on it within 14 m breaks it.
@@ -90,7 +90,7 @@ Caught or escaped survivors become free-flying spectators and can press **V** to
   - **Lost trail:** where it last heard you it listens, shrieks, then sweeps the area. Once the gate opens it guards it.
 - **Play as monster**: two bot survivors who play by stealth.
   - **What they know:** only what they could really see or hear. That's a moving monster within 14 m, a still one within 4 m, its charging footsteps within 22 m, and its shriek.
-  - **Reacting:** when they notice you, they freeze silently, then creep away sideways in a crouch, which is too quiet for you to hear beyond ~3.6 m.
+  - **Reacting:** when they notice you, they freeze silently, then creep away sideways in a crouch.
   - **Sprinting:** only in a short burst when you charge right at them or hit them, then they go quiet again.
   - **Caution:** they won't repair (the hum carries ~13 m) while you were recently nearby, move crouched for a while after a scare, pause to look around, and wait out a guarded gate.
 
