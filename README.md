@@ -39,7 +39,7 @@ Generators and the altar take longer with more survivors, so team size stays fai
 The forest is never quiet:
 - **Random sounds:** about every 2.5–7.5 s a sound plays somewhere on the map: a snapping branch, a creaking trunk, an owl, a crow, a rustle in the brush, a splash in the creek, or (rarely) the chapel bell. Survivors hear it from its direction. The monster sees it as a ripple like any other, and the bot monster sometimes goes to check the loud ones.
 - **Wind gusts:** every 20–45 s the wind rises for 5–10 s. The wind sound swells and the grass bends.
-- **Masking:** crouched footsteps are barely audible (a faint scuff ripple) and vanish entirely near the creek, the campfire or a running generator, or during a gust. Walking is half-masked in those places. The survivor HUD's noise bar shows what the monster actually hears and reads **Masked** when you're covered.
+- **Nothing is masked:** every sound, from a survivor, the forest or a thrown stone, sends a ring that travels all the way to the edges of the map, fading as it spreads. Crouching is quieter (a faint ring) but never hidden. The survivor HUD's noise bar shows how loud you are.
 
 ### Survivor tools
 - **Hide (E):** step into a locker or outhouse. You make no sound and can't be seen or exposed, for up to 15 s of held breath (8 s to recover). The monster can still tear a hiding place open if it strikes it.

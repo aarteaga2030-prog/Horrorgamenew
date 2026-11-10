@@ -30,7 +30,7 @@ const CFG = {
   BOT_HEARING: 24,        // the bot monster hears noise x this many metres, so bot matches stay winnable
   HIT_INVULN: 2.5,
   MAX_HP: 2,
-  MAX_RIPPLES: 48,
+  MAX_RIPPLES: 64,
   NET_HZ: 20,
   PEER_PREFIX: 'blindsight-room-',
 };
@@ -398,10 +398,14 @@ monsterSky.frustumCulled = false;
 
 // Ripple ring buffer
 let rippleIdx = 0;
+const MAP_REACH = 170; // metres: corner to corner of the forest, so a ring always reaches the far edge
 function addRipple(pos, maxR, strength, speed) {
   const i = rippleIdx; rippleIdx = (rippleIdx + 1) % CFG.MAX_RIPPLES;
   sonarShared.uRip.value[i].set(pos.x, pos.y, pos.z, time);
-  sonarShared.uRipP.value[i].set(maxR, strength, speed || Math.max(7, maxR / 1.2));
+  // Every sound travels all the way to the edges of the map, fading gradually as it
+  // spreads. Loudness is carried by strength; maxR is kept only for the call sites.
+  void maxR;
+  sonarShared.uRipP.value[i].set(MAP_REACH, strength, Math.max(speed || 0, 24));
 }
 function clearRipples() { for (const v of sonarShared.uRip.value) v.w = -999; }
 
@@ -666,11 +670,10 @@ function ambientMask(x, z) {
 }
 // How loud a survivor's noise really is once the surroundings are taken into account.
 // Crouched footsteps are nearly inaudible and vanish entirely under any masking sound.
-function heardNoise(n, crouched, x, z) {
+// Sounds are never hidden: the surroundings don't mask anything. Crouching is just quiet.
+function heardNoise(n, crouched) {
   if (n <= 0.01) return 0;
-  const mask = ambientMask(x, z);
-  if (crouched) return mask > 0.35 ? 0 : n * 0.45 * (1 - mask * 2);
-  return n * (1 - mask * 0.45);
+  return crouched ? n * 0.45 : n;
 }
 const inWater = (x, z) => distToPolyline(x, z, CREEK) < CREEK_W / 2 && !onBridge(x, z);
 // A flat ribbon following a polyline (for the water and its muddy banks).
@@ -3041,9 +3044,9 @@ function updateRemotes(dt) {
         if (r.stepT <= 0) {
           const crouched = r.crouch && !r.repairing;
           r.stepT = (crouched ? 1.2 + Math.random() * 0.8 : lerp(0.95, 0.32, n)) * (r.repairing ? 1.4 : 1);
-          if (crouched) addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 1.6, 0.14, 3);           // a barely-there scuff
+          if (crouched) addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 1.6, 0.18, 24);          // faint, but it still carries
           else addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 2.2 + n * 11, 0.3 + n * 0.95);
-          if (me.isMonster && !crouched) sfx.blip(Math.max(0.15, distVol(r.pos, 60)) * (0.3 + n), panOf(r.pos)); // faint but audible at any range
+          if (me.isMonster) sfx.blip(Math.max(0.15, distVol(r.pos, 60)) * (0.3 + n), panOf(r.pos)); // faint but audible at any range
         }
       }
     }
@@ -3290,7 +3293,6 @@ function updateHUD() {
     // The bar shows what the monster actually hears, after the surroundings mask it.
     const heard = heardNoise(me.noise, me.crouch && !me.repairing, me.pos.x, me.pos.z);
     $('#noise-fill').style.width = `${heard * 100}%`;
-    $('#noise-label').textContent = me.noise > 0.01 && heard < 0.01 ? 'Masked' : 'Noise';
     $('#stone-count').textContent = me.stones ?? 0;
     $('#breath-row').classList.toggle('hidden', !(me.hidden >= 0 || me.hideT > 0.2));
     $('#breath-fill').style.width = `${(1 - (me.hideT || 0) / HIDE_MAX) * 100}%`;
