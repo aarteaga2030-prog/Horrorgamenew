@@ -148,7 +148,7 @@ install('sessionStorage');
           <div>
             <h3>Survivors</h3>
             <p>Repair all <b>3 generators</b> (hold <kbd>E</kbd>) to open the exit gate, then escape. Or stay alive until the timer runs out.</p>
-            <p>Every step makes noise. <kbd>C</kbd> crouch is nearly silent, <kbd>Shift</kbd> sprinting is loud. Repairing hums.</p>
+            <p>Every step makes noise. <kbd>C</kbd> crouch is nearly silent (fully masked near the creek, the fire, a running generator, or when the wind gusts), <kbd>Shift</kbd> sprinting is loud. Repairing hums.</p>
             <p><kbd>F</kbd> flashlight. <kbd>E</kbd> hides you in lockers and outhouses for as long as you can hold your breath. <kbd>G</kbd> throws a stone as a decoy. Two hits and you're taken.</p>
           </div>
           <div>
@@ -177,7 +177,7 @@ install('sessionStorage');
     <div id="hud-survivor" class="hud-box hidden">
       <div class="stat"><span>Health</span><span id="hp-pips"></span></div>
       <div class="stat"><span>Stamina</span><div class="bar"><div id="stamina-fill"></div></div></div>
-      <div class="stat"><span>Noise</span><div class="bar noise"><div id="noise-fill"></div></div></div>
+      <div class="stat"><span id="noise-label">Noise</span><div class="bar noise"><div id="noise-fill"></div></div></div>
       <div class="stat hidden" id="breath-row"><span>Breath</span><div class="bar"><div id="breath-fill"></div></div></div>
       <div class="stat"><span>Stones (G)</span><span id="stone-count">3</span></div>
     </div>

@@ -651,6 +651,27 @@ function onBridge(x, z) {
   }
   return false;
 }
+// ---- Environmental sound masking --------------------------------------------------
+// The forest is never silent. The creek, the campfire, running generators and wind
+// gusts cover quiet sounds: a crouching survivor near any of them can't be heard at all.
+// Returns 0 (silent surroundings) .. 1 (fully masked).
+const ENV = { gust: 0 }; // gust strength, 0..1, synced from the host
+function ambientMask(x, z) {
+  let m = ENV.gust;
+  const dc = distToPolyline(x, z, CREEK);
+  m = Math.max(m, clamp(1 - (dc - 1.5) / 4.5, 0, 1));                           // babbling water
+  m = Math.max(m, clamp(1 - (Math.hypot(x - CAMPFIRE.x, z - CAMPFIRE.z) - 2) / 4, 0, 1) * 0.8); // crackling fire
+  OBJ.forEach((o, i) => { if (o.kind === 'gen' && game.gens[i]?.done) m = Math.max(m, clamp(1 - (Math.hypot(x - o.x, z - o.z) - 2) / 7, 0, 1)); });
+  return m;
+}
+// How loud a survivor's noise really is once the surroundings are taken into account.
+// Crouched footsteps are nearly inaudible and vanish entirely under any masking sound.
+function heardNoise(n, crouched, x, z) {
+  if (n <= 0.01) return 0;
+  const mask = ambientMask(x, z);
+  if (crouched) return mask > 0.35 ? 0 : n * 0.45 * (1 - mask * 2);
+  return n * (1 - mask * 0.45);
+}
 const inWater = (x, z) => distToPolyline(x, z, CREEK) < CREEK_W / 2 && !onBridge(x, z);
 // A flat ribbon following a polyline (for the water and its muddy banks).
 function ribbonGeometry(pts, width, y) {
@@ -1498,12 +1519,43 @@ const sfx = {
   breath: (vol, pan) => { noise({ dur: 0.9, vol: vol * 0.5, pan, freq: 420, q: 0.7 }); noise({ dur: 1.1, vol: vol * 0.35, pan, freq: 260, q: 0.8, delay: 1.0 }); },
   chase: (k) => { tone({ f: 52, f2: 46, dur: 0.22, type: 'sawtooth', vol: 0.16 * k }); noise({ dur: 0.08, vol: 0.12 * k, freq: 140, q: 0.8 }); },
   sting: () => { for (const f of [311, 440, 466, 932]) tone({ f, f2: f * 1.03, dur: 1.1, type: 'sawtooth', vol: 0.07 }); noise({ dur: 0.5, vol: 0.3, freq: 3200, q: 0.8 }); },
+  branch: (vol, pan) => { noise({ dur: 0.06, vol: vol * 0.7, pan, freq: 2600, q: 2 }); noise({ dur: 0.12, vol: vol * 0.5, pan, freq: 900, q: 1.5, delay: 0.05 }); noise({ dur: 0.3, vol: vol * 0.2, pan, freq: 400, q: 1, delay: 0.12 }); },
+  creak: (vol, pan) => { tone({ f: 70 + Math.random() * 40, f2: 50 + Math.random() * 30, dur: 1.4 + Math.random(), type: 'sawtooth', vol: vol * 0.08, pan, attack: 0.3 }); tone({ f: 140, f2: 95, dur: 1.2, type: 'triangle', vol: vol * 0.05, pan, attack: 0.4 }); },
+  owl: (vol, pan) => { for (const [d, f] of [[0, 380], [0.45, 360], [0.75, 360]]) tone({ f, f2: f * 0.92, dur: 0.35, type: 'sine', vol: vol * 0.22, pan, delay: d, attack: 0.06 }); },
+  crow: (vol, pan) => { for (const d of [0, 0.35, 0.7]) { tone({ f: 620, f2: 480, dur: 0.22, type: 'sawtooth', vol: vol * 0.06, pan, delay: d }); noise({ dur: 0.2, vol: vol * 0.15, pan, freq: 1400, q: 2, delay: d }); } },
+  rustle: (vol, pan) => { for (let i = 0; i < 6; i++) noise({ dur: 0.08 + Math.random() * 0.1, vol: vol * 0.18, pan, freq: 3000 + Math.random() * 3000, q: 0.8, delay: i * 0.07 + Math.random() * 0.05 }); },
+  splash: (vol, pan) => { noise({ dur: 0.35, vol: vol * 0.3, pan, freq: 1100, q: 0.5 }); noise({ dur: 0.15, vol: vol * 0.15, pan, freq: 3200, q: 1, delay: 0.08 }); },
+  bell: (vol, pan) => { for (const f of [196, 392, 588, 932]) tone({ f, dur: 4, type: 'sine', vol: vol * (f === 196 ? 0.14 : 0.05), pan, attack: 0.005 }); },
   howl: (vol, pan) => { tone({ f: 250, f2: 520, dur: 1.1, type: 'sine', vol, pan, attack: 0.4 }); tone({ f: 520, f2: 180, dur: 2.6, type: 'sine', vol: vol * 0.9, pan, delay: 1.0, attack: 0.1 }); tone({ f: 527, f2: 186, dur: 2.6, type: 'triangle', vol: vol * 0.4, pan, delay: 1.0 }); },
   relic: () => { tone({ f: 660, f2: 990, dur: 0.5, type: 'sine', vol: 0.12 }); tone({ f: 1320, dur: 0.7, type: 'sine', vol: 0.06, delay: 0.15 }); },
   repair: () => noise({ dur: 0.06, vol: 0.06, freq: 2500 + Math.random() * 1500, q: 4 }),
   splash: (vol) => { noise({ dur: 0.25, vol: 0.18 + vol * 0.2, freq: 900 + Math.random() * 600, q: 0.5 }); noise({ dur: 0.12, vol: 0.1, freq: 3000, q: 1, delay: 0.05 }); },
   creak: (vol) => { tone({ f: 160 + Math.random() * 60, f2: 110, dur: 0.22, type: 'sawtooth', vol: 0.03 + vol * 0.05 }); noise({ dur: 0.08, vol: vol * 0.2, freq: 500, q: 1 }); },
 };
+// Continuous ambience: a wind bed that swells with gusts, and the creek when you're near it.
+const ambBed = { wind: null, windF: null, creek: null };
+function startAmbience() {
+  if (!audio.ctx || ambBed.wind) return;
+  const mk = (type, freq, q) => {
+    const s = audio.ctx.createBufferSource(); s.buffer = audio.noiseBuf; s.loop = true;
+    const f = audio.ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+    const g = audio.ctx.createGain(); g.gain.value = 0;
+    s.connect(f).connect(g).connect(audio.master); s.start();
+    return { g, f };
+  };
+  const w = mk('bandpass', 380, 0.6), c = mk('bandpass', 1700, 0.9);
+  ambBed.wind = w.g; ambBed.windF = w.f; ambBed.creek = c.g;
+}
+function updateAmbience() {
+  if (!audio.ctx) return;
+  startAmbience();
+  const playing = game.phase === 'playing' || game.phase === 'ended', t = audio.ctx.currentTime;
+  const wind = playing ? 0.025 + ENV.gust * 0.11 + Math.sin(time * 0.3) * 0.008 : 0;
+  ambBed.wind.gain.setTargetAtTime(wind, t, 0.4);
+  ambBed.windF.frequency.setTargetAtTime(320 + ENV.gust * 380 + Math.sin(time * 0.7) * 60, t, 0.5);
+  const dc = distToPolyline(me.pos.x, me.pos.z, CREEK);
+  ambBed.creek.gain.setTargetAtTime(playing ? clamp(1 - dc / 28, 0, 1) ** 2 * 0.07 : 0, t, 0.5);
+}
 function startDrone(mode) {
   if (!audio.ctx) return;
   for (const n of audio.drone) { try { n.stop(); } catch (e) { /* already stopped */ } }
@@ -1746,6 +1798,7 @@ function hostStart() {
   const nSurv = list.filter((p) => !p.isMonster).length;
   hs.mult = [0.75, 0.75, 1, 1.2, 1.4][Math.min(nSurv, 4)];
   hs.phase = 'playing'; hs.timeLeft = MODES[hs.mode].duration; hs.gateOpen = false; hs.lastKill = undefined;
+  hs.ambT = 3; hs.gustT = 25; hs.gust = 0; hs.gustDur = 0;
   hs.banished = false; hs.pending = []; hs.nextPulse = 40; hs.omen = false; hs.shriek = null;
   hs.gens = OBJ.map(() => ({ progress: 0, done: false }));
   broadcast({ t: 'start', mode: hs.mode, objs: OBJ, duration: hs.timeLeft, players: list.map((p) => ({ id: p.id, name: p.name, isMonster: p.isMonster, isBot: p.isBot, x: p.x, z: p.z, ry: p.ry, colorIdx: p.colorIdx })) });
@@ -1767,12 +1820,32 @@ function hostUpdate(dt) {
   if (hs.snapAcc >= 1 / CFG.NET_HZ) {
     hs.snapAcc = 0;
     broadcast({
-      t: 'snap', tl: r2(hs.timeLeft), go: hs.gateOpen,
+      t: 'snap', tl: r2(hs.timeLeft), go: hs.gateOpen, wg: r2(hs.gust),
       g: hs.gens.map((g) => r2(g.progress)),
       p: Object.values(hs.players).map((p) => ({ id: p.id, x: r2(p.x), z: r2(p.z), ry: r2(p.ry), n: r2(p.n), c: p.c, r: p.r, h: p.h ? 1 : 0, hp: p.hp, s: p.s })),
     });
   }
 
+  // The forest's own noises: random sounds that reach the monster just like a survivor's.
+  hs.ambT -= dt;
+  if (hs.ambT <= 0) {
+    hs.ambT = 2.5 + Math.random() * 5;
+    const k = AMBIENT_KINDS[weightedPick(AMBIENT_KINDS.map((a) => a.w))];
+    let x = FENCE + 4 + Math.random() * (AREA - FENCE * 2 - 8), z = FENCE + 4 + Math.random() * (AREA - FENCE * 2 - 8);
+    if (k.at) [x, z] = k.at();
+    broadcast({ t: 'event', k: 'amb', a: k.id, x: r2(x), z: r2(z) });
+    for (const m of Object.values(hs.players)) {
+      // the bot monster is fooled by loud ones close enough to hear, now and then
+      if (m.isMonster && m.bot && k.loud > 0.5 && Math.hypot(m.x - x, m.z - z) < k.loud * CFG.BOT_HEARING && Math.random() < 0.45) {
+        m.bot.lead = { x, z, t: time }; if (m.bot.mode !== 'stalk') { m.bot.mode = 'stalk'; m.bot.goalKey = ''; } m.bot.listenT = 0;
+      }
+    }
+  }
+  // Wind gusts: every so often the wind rises for several seconds and hides quiet movement.
+  hs.gustT -= dt;
+  if (hs.gustT <= 0 && hs.gustDur <= 0) { hs.gustDur = 5 + Math.random() * 5; hs.gustT = 20 + Math.random() * 25; }
+  if (hs.gustDur > 0) { hs.gustDur -= dt; hs.gust = Math.min(1, hs.gust + dt / 1.5); } else hs.gust = Math.max(0, hs.gust - dt / 2);
+  ENV.gust = hs.gust;
   // Thrown stones land (a decoy noise the monster can hear)
   for (const q of hs.pending.filter((q) => time >= q.t)) {
     broadcast({ t: 'event', k: 'clack', x: q.x, z: q.z });
@@ -1816,6 +1889,16 @@ function hostUpdate(dt) {
     broadcast({ t: 'end', winner: end.w, reason: end.reason, stats: surv.map((p) => ({ name: p.name, s: p.s })) });
   }
 }
+const AMBIENT_KINDS = [
+  { id: 'branch', w: 3, loud: 0.8 },   // a branch snaps somewhere
+  { id: 'creak', w: 4, loud: 0.45 },   // a trunk groans in the wind
+  { id: 'owl', w: 3, loud: 0.6 },
+  { id: 'crow', w: 1.5, loud: 0.7 },
+  { id: 'rustle', w: 4, loud: 0.35 },  // something small in the brush
+  { id: 'splash', w: 2, loud: 0.5, at: () => { const k = Math.floor(Math.random() * (CREEK.length - 1)), t = Math.random(); return [clamp(lerp(CREEK[k][0], CREEK[k + 1][0], t), 6, AREA - 6), clamp(lerp(CREEK[k][1], CREEK[k + 1][1], t), 6, AREA - 6)]; } },
+  { id: 'bell', w: 0.5, loud: 1.0, at: () => [84, 32] },  // the chapel bell, moved by the wind
+];
+function weightedPick(ws) { let r = Math.random() * ws.reduce((a, b) => a + b, 0); for (let i = 0; i < ws.length; i++) { r -= ws[i]; if (r <= 0) return i; } return ws.length - 1; }
 function hostBackToLobby() { hs.phase = 'lobby'; broadcastLobby(); }
 
 // ---------------- BOTS (simulated on the host) ----------------
@@ -2016,7 +2099,7 @@ function updateMonsterBot(p, dt) {
     let best = null, bestScore = -Infinity;
     for (const s of prey) {
       if (s.h) continue; // hidden survivors make no sound
-      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, s.n * CFG.BOT_HEARING);
+      const d = Math.hypot(s.x - p.x, s.z - p.z), radius = Math.max(1.6, heardNoise(s.n, s.c && !s.r, s.x, s.z) * CFG.BOT_HEARING);
       if (d > radius) continue;
       if (radius - d > bestScore) { bestScore = radius - d; best = s; }
     }
@@ -2238,6 +2321,7 @@ function leaveMatch() {
 function onSnap(msg) {
   if (game.phase !== 'playing') return;
   game.timeLeft = msg.tl;
+  if (!net.isHost) ENV.gust = msg.wg || 0;
   game.gateOpen = msg.go;
   msg.g.forEach((v, i) => { if (game.gens[i]) { game.gens[i].progress = v; game.gens[i].done = v >= 1; } });
   const seen = new Set();
@@ -2335,6 +2419,13 @@ function onEvent(e) {
         sfx.gen();
         addFeed(e.left > 0 ? `A generator roars to life. ${e.left} remaining.` : 'All generators online!', me.isMonster ? 'warn' : 'good');
       }
+      break;
+    }
+    case 'amb': {
+      const k = AMBIENT_KINDS.find((a) => a.id === e.a); if (!k) break;
+      if (me.isMonster || viewMode === 'monster') addRipple(pos.setY(0.05), 2.5 + k.loud * 10, 0.3 + k.loud * 0.8);
+      const v = distVol(pos, 70) * (0.4 + k.loud * 0.6), pan = panOf(pos);
+      sfx[e.a]?.(v, pan);
       break;
     }
     case 'clack': {
@@ -2944,13 +3035,15 @@ function updateRemotes(dt) {
       }
     } else if (me.isMonster || viewMode === 'monster') {
       // ===== ECHOLOCATION: survivor noise → sonar ripples on the monster's grid
-      if (r.noise > 0.01) {
+      const n = heardNoise(r.noise, r.crouch && !r.repairing, r.pos.x, r.pos.z);
+      if (n > 0.005) {
         r.stepT -= dt;
         if (r.stepT <= 0) {
-          const n = r.noise;
-          r.stepT = lerp(0.95, 0.32, n) * (r.repairing ? 1.4 : 1);
-          addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 2.2 + n * 11, 0.3 + n * 0.95);
-          if (me.isMonster) sfx.blip(Math.max(0.15, distVol(r.pos, 60)) * (0.3 + n), panOf(r.pos)); // faint but audible at any range
+          const crouched = r.crouch && !r.repairing;
+          r.stepT = (crouched ? 1.2 + Math.random() * 0.8 : lerp(0.95, 0.32, n)) * (r.repairing ? 1.4 : 1);
+          if (crouched) addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 1.6, 0.14, 3);           // a barely-there scuff
+          else addRipple(_v.set(r.pos.x, 0.05, r.pos.z), 2.2 + n * 11, 0.3 + n * 0.95);
+          if (me.isMonster && !crouched) sfx.blip(Math.max(0.15, distVol(r.pos, 60)) * (0.3 + n), panOf(r.pos)); // faint but audible at any range
         }
       }
     }
@@ -2962,7 +3055,7 @@ function updateRemotes(dt) {
 //  WORLD ANIMATION, HUD, AMBIENCE
 // ----------------------------------------------------------------------------
 // ---- Atmosphere: sky, lightning, grass, fireflies, embers (survivor view only) ---------
-const atmo = { uTime: { value: 0 } };
+const atmo = { uTime: { value: 0 }, uGust: { value: 0 } };
 function pointCloud(positions, color, size, mode) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -3035,9 +3128,9 @@ function buildAtmosphere(rng) {
   const q1 = new THREE.PlaneGeometry(0.6, 0.5); q1.translate(0, 0.25, 0); const q2 = q1.clone(); q2.rotateY(Math.PI / 2);
   const grassMat = new THREE.MeshStandardMaterial({ map: bladeTex, alphaTest: 0.4, side: THREE.DoubleSide, color: 0x9db597, roughness: 1 });
   grassMat.onBeforeCompile = (sh) => {
-    sh.uniforms.uTime = atmo.uTime;
-    sh.vertexShader = 'uniform float uTime;\n' + sh.vertexShader.replace('#include <begin_vertex>',
-      '#include <begin_vertex>\n#ifdef USE_INSTANCING\n transformed.x += sin(uTime * 1.6 + instanceMatrix[3].x * 0.7 + instanceMatrix[3].z * 0.5) * 0.08 * position.y * 2.0;\n#endif');
+    sh.uniforms.uTime = atmo.uTime; sh.uniforms.uGust = atmo.uGust;
+    sh.vertexShader = 'uniform float uTime;\nuniform float uGust;\n' + sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n#ifdef USE_INSTANCING\n transformed.x += sin(uTime * 1.6 + instanceMatrix[3].x * 0.7 + instanceMatrix[3].z * 0.5) * (0.08 + uGust * 0.22) * position.y * 2.0;\n#endif');
   };
   const N = 6500, grass = new THREE.InstancedMesh(mergeGeometries([q1, q2]), grassMat, N), dummy = new THREE.Object3D();
   let n = 0;
@@ -3112,7 +3205,8 @@ function updateScares(dt, d, mon) {
 
 let heartT = 0;
 function updateWorld(dt, monsterDist, mon) {
-  atmo.uTime.value = time;
+  atmo.uTime.value = time; atmo.uGust.value = ENV.gust;
+  updateAmbience();
   updateScares(dt, monsterDist, mon);
   // Firelight and cabin lamps flicker
   for (const l of world.flickers) {
@@ -3193,7 +3287,10 @@ function updateHUD() {
     $('#hp-pips').innerHTML = Array.from({ length: CFG.MAX_HP }, (_, i) => `<span class="${i < me.hp ? 'on' : ''}"></span>`).join('');
     $('#stamina-fill').style.width = `${me.stamina * 100}%`;
     $('#stamina-fill').style.background = me.exhausted ? '#ff3b3b' : '';
-    $('#noise-fill').style.width = `${me.noise * 100}%`;
+    // The bar shows what the monster actually hears, after the surroundings mask it.
+    const heard = heardNoise(me.noise, me.crouch && !me.repairing, me.pos.x, me.pos.z);
+    $('#noise-fill').style.width = `${heard * 100}%`;
+    $('#noise-label').textContent = me.noise > 0.01 && heard < 0.01 ? 'Masked' : 'Noise';
     $('#stone-count').textContent = me.stones ?? 0;
     $('#breath-row').classList.toggle('hidden', !(me.hidden >= 0 || me.hideT > 0.2));
     $('#breath-fill').style.width = `${(1 - (me.hideT || 0) / HIDE_MAX) * 100}%`;
@@ -3358,4 +3455,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, viewBody, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, viewBody, ENV, heardNoise, ambientMask, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
