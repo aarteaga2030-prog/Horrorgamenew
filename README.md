@@ -151,7 +151,9 @@ Notes:
 - **Survivor animation:** the walk/idle clips are blended by speed. Crouch, sprint lean, repairing, hit flinch and the death fall are layered on top as procedural bone rotations.
 
 ## IDEA Foundry build
-`python3 tools/build-foundry.py` writes `foundry/` (the upload folder) and `blindsight-foundry.zip`, then checks them against the Foundry build contract: allowed file types only, relative paths, the storage snippet first in `<head>`, and prefixed storage keys (`blindsight:`). `game.js` is inlined into `index.html` so the page also opens straight from the filesystem. Opened that way, browsers block loading the model files, so the game runs with simple stand-in characters.
+`python3 tools/build-foundry.py` writes `foundry/` (the upload folder) and `blindsight-foundry.zip`, then checks them against the Foundry build contract: served file types only, relative paths, the storage snippet first in `<head>`, and prefixed storage keys (`blindsight:`).
+- `game.js` is inlined into `index.html`, so the page also opens straight from the filesystem.
+- Foundry can't serve `.glb`, so each model ships as base64 inside plain `.js` files (at most 3 MB each) loaded by script tags. `game.js` reads them from `window.BLINDSIGHT_MODELS`. That works from the filesystem too.
 
 ## Playtest build (Claude artifact)
 `play.html` is an embeddable copy of the page used to publish a playtest build as a Claude artifact. Regenerate it after editing `index.html`:

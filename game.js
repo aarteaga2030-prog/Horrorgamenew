@@ -1211,6 +1211,14 @@ const loader = new GLTFLoader();
 // since sandboxed embeds may forbid fetching blob: URLs. GLTFLoader still sets flipY = false.
 loader.register((parser) => { parser.textureLoader = new THREE.TextureLoader(parser.options.manager); return { name: 'img_texture_loader' }; });
 function loadGLB(url, onProgress) {
+  if (window.BLINDSIGHT_MODELS && window.BLINDSIGHT_MODELS[url]) {
+    // Hosts that can't serve .glb (IDEA Foundry): the build ships each model as base64 in
+    // plain .js files loaded by script tags, which also works from file://.
+    const bin = atob(window.BLINDSIGHT_MODELS[url].join('')), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    onProgress?.({ loaded: 1, total: 1 });
+    return new Promise((res, rej) => loader.parse(bytes.buffer, '', res, rej));
+  }
   if (window.BLINDSIGHT_EMBED) {
     // The artifact host only serves web types, so the embed build ships each .glb as
     // base64 inside a .json file (see tools/build-play.py).
