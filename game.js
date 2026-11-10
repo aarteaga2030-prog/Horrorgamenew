@@ -82,13 +82,25 @@ const GRAVES = { x0: 66, x1: 78, z0: 22, z1: 36 };
 const LAMPS = [[61.6, 108], [50.6, 84], [73, 84.6], [62, 41]];
 // Hiding places: step inside (E) and you make no sound and can't be seen or heard, but
 // only for as long as you can hold your breath. ry = the way the door faces.
+// type sets the model and how low you sit inside (eye height, metres).
+const HIDE_TYPES = { locker: 1.45, wardrobe: 1.45, outhouse: 1.45, crypt: 1.0, truck: 1.9, log: 0.42, crate: 0.85 };
 const LOCKERS = [
-  { x: 38.4, z: 36.6, ry: Math.PI },       // main cabin
-  { x: 91.4, z: 70.6, ry: Math.PI / 2 },   // hunting cabin
-  { x: 80.2, z: 22, ry: -Math.PI / 2 },    // chapel
-  { x: 87.8, z: 28.5, ry: Math.PI / 2 },   // chapel
-  { x: 96, z: 99.6, ry: 0 },               // outhouse by the tower
-  { x: 46.5, z: 100.5, ry: -Math.PI / 2 }, // outhouse by the camp
+  { x: 38.4, z: 36.6, ry: Math.PI, type: 'locker' },          // main cabin, east room
+  { x: 91.4, z: 70.6, ry: Math.PI / 2, type: 'locker' },      // hunting cabin
+  { x: 80.2, z: 22, ry: -Math.PI / 2, type: 'locker' },       // chapel
+  { x: 87.8, z: 28.5, ry: Math.PI / 2, type: 'locker' },      // chapel
+  { x: 96, z: 99.6, ry: 0, type: 'outhouse' },                // by the tower
+  { x: 46.5, z: 100.5, ry: -Math.PI / 2, type: 'outhouse' },  // by the camp
+  { x: 35.8, z: 43.3, ry: 0, type: 'wardrobe' },              // main cabin, west room
+  { x: 29.6, z: 84.6, ry: Math.PI, type: 'wardrobe' },        // shed
+  { x: 71, z: 37.2, ry: Math.PI, type: 'crypt' },             // graveyard
+  { x: 67.3, z: 108, ry: -Math.PI / 2, type: 'truck' },       // the wrecked truck's cab
+  { x: 14, z: 32, ry: Math.PI / 2, type: 'log' },             // near the stone circle
+  { x: 102, z: 44, ry: 0, type: 'log' },                      // east woods, by the creek
+  { x: 10, z: 74, ry: Math.PI / 2, type: 'crate' },           // west woods
+  { x: 50, z: 10, ry: Math.PI, type: 'crate' },               // north woods
+  { x: 110, z: 70, ry: -Math.PI / 2, type: 'crate' },         // east woods
+  { x: 14, z: 108, ry: 0, type: 'crate' },                    // south-west woods
 ];
 const HIDE_MAX = 15, HIDE_COOLDOWN = 8;
 const GENS = [
@@ -979,6 +991,7 @@ function buildTruck() {
   g.traverse((o) => { if (o.isMesh) o.castShadow = true; });
   world.truckLamp = lampMat;
   addBox(TRUCK.x - 1.15, TRUCK.z - 2.5, TRUCK.x + 1.15, TRUCK.z + 2.5, 'truck');
+  world.truckBody = cab;
   scene.add(reg(g));
 }
 function buildLamps() {
@@ -996,18 +1009,58 @@ function buildLamps() {
   });
 }
 function buildLockers() {
+  world.hides = [];
   LOCKERS.forEach((L, i) => {
     const g = new THREE.Group(); g.position.set(L.x, 0, L.z); g.rotation.y = L.ry;
-    const out = i >= 4; // outdoor ones are wooden outhouses
-    const w = out ? 1.1 : 0.9, d = out ? 1.1 : 0.6, h = out ? 2.2 : 2.0;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), out ? stdMat({ map: TEX.planks, color: 0x8a7a66 }) : MAT.metal); body.position.y = h / 2; body.castShadow = true; g.add(body);
-    const door = new THREE.Mesh(new THREE.BoxGeometry(w * 0.84, h * 0.9, 0.04), out ? stdMat({ map: TEX.planks, color: 0x6e6050 }) : stdMat({ color: 0x2c3638, metalness: 0.7, roughness: 0.5 })); door.position.set(0, h / 2, -d / 2 - 0.02); g.add(door);
-    for (let k = 0; k < 4; k++) { const slit = new THREE.Mesh(new THREE.BoxGeometry(w * 0.55, 0.03, 0.02), stdMat({ color: 0x050505 })); slit.position.set(0, 1.5 + k * 0.07, -d / 2 - 0.045); g.add(slit); }
-    if (out) { const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.1, d + 0.3), stdMat({ map: TEX.roof })); roof.position.y = h + 0.05; roof.rotation.x = 0.12; g.add(roof); }
-    const hx = Math.abs(Math.cos(L.ry)) * w / 2 + Math.abs(Math.sin(L.ry)) * d / 2, hz = Math.abs(Math.sin(L.ry)) * w / 2 + Math.abs(Math.cos(L.ry)) * d / 2;
-    addBox(L.x - hx, L.z - hz, L.x + hx, L.z + hz, 'locker');
+    const box = (w, h, d, mat, x = 0, y = h / 2, z = 0) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); m.castShadow = true; m.receiveShadow = true; g.add(m); return m; };
+    const dark = stdMat({ color: 0x050505 }), wood = stdMat({ map: TEX.planks, color: 0x8a7a66 }), woodD = stdMat({ map: TEX.planks, color: 0x5e5244 });
+    const slits = (w, y0, z, n = 4) => { for (let k = 0; k < n; k++) box(w, 0.03, 0.02, dark, 0, y0 + k * 0.07, z); };
+    let w = 0.9, d = 0.6;
+    switch (L.type) {
+      case 'locker':
+        box(w, 2.0, d, MAT.metal); box(w * 0.84, 1.8, 0.04, stdMat({ color: 0x2c3638, metalness: 0.7, roughness: 0.5 }), 0, 1.0, -d / 2 - 0.02); slits(w * 0.55, 1.5, -d / 2 - 0.045);
+        break;
+      case 'wardrobe':
+        w = 1.1; d = 0.6; box(w, 2.1, d, woodD); box(w * 0.46, 1.9, 0.04, wood, -w * 0.24, 1.05, -d / 2 - 0.02); box(w * 0.46, 1.9, 0.04, wood, w * 0.24, 1.05, -d / 2 - 0.02); slits(w * 0.7, 1.45, -d / 2 - 0.045);
+        break;
+      case 'outhouse':
+        w = 1.1; d = 1.1; box(w, 2.2, d, wood); box(w * 0.84, 2.0, 0.04, woodD, 0, 1.1, -d / 2 - 0.02); slits(w * 0.5, 1.6, -d / 2 - 0.045);
+        { const roof = box(w + 0.3, 0.1, d + 0.3, stdMat({ map: TEX.roof }), 0, 2.25); roof.rotation.x = 0.12; }
+        break;
+      case 'crypt': {
+        w = 1.8; d = 1.4; box(w, 1.6, d, MAT.rock); box(w + 0.3, 0.2, d + 0.3, MAT.rock, 0, 1.7);
+        box(0.9, 1.2, 0.06, stdMat({ color: 0x1a1d1c, metalness: 0.6, roughness: 0.6 }), 0, 0.6, -d / 2 - 0.03); // iron door, ajar
+        for (let k = 0; k < 5; k++) box(0.03, 0.5, 0.03, dark, -0.3 + k * 0.15, 0.95, -d / 2 - 0.07);              // grille
+        break;
+      }
+      case 'truck': w = 0; break; // the truck model is already there
+      case 'log': {
+        w = 0.9; d = 3.4;
+        const log = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.55, d, 12, 1, true), MAT.bark); log.rotation.x = Math.PI / 2; log.position.y = 0.48; log.castShadow = true; g.add(log);
+        const inner = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.46, d - 0.02, 12, 1, true), stdMat({ color: 0x120c07, side: THREE.BackSide })); inner.rotation.x = Math.PI / 2; inner.position.y = 0.48; g.add(inner);
+        const cap = new THREE.Mesh(new THREE.CircleGeometry(0.55, 12), MAT.bark); cap.position.set(0, 0.48, d / 2); g.add(cap);
+        break;
+      }
+      case 'crate':
+        w = 1.4; d = 1.4; box(w, 1.3, d, stdMat({ map: TEX.crate })); box(w * 0.7, 0.9, 0.04, stdMat({ map: TEX.crate, color: 0x8a8a8a }), 0, 0.6, -d / 2 - 0.02); slits(w * 0.45, 0.85, -d / 2 - 0.045, 3);
+        break;
+    }
+    if (w) {
+      const hx = Math.abs(Math.cos(L.ry)) * w / 2 + Math.abs(Math.sin(L.ry)) * d / 2, hz = Math.abs(Math.sin(L.ry)) * w / 2 + Math.abs(Math.cos(L.ry)) * d / 2;
+      addBox(L.x - hx, L.z - hz, L.x + hx, L.z + hz, 'locker');
+    }
     scene.add(reg(g));
+    world.hides[i] = g;
   });
+}
+// While you're inside, your own hiding spot is invisible to you (so you see out past its
+// walls), your flashlight is off, and the screen frames the view through its gaps.
+function setHideView(li) {
+  (world.hides || []).forEach((g, i) => { if (g) g.visible = i !== li; });
+  if (world.truckBody) world.truckBody.visible = !(li >= 0 && LOCKERS[li].type === 'truck');
+  flashlight.visible = li < 0 && flashlightOn && viewMode === 'survivor';
+  const o = $('#hide-overlay');
+  o.className = li < 0 ? 'hidden' : 'hide-' + LOCKERS[li].type;
 }
 
 function buildGenerator(i) {
@@ -1209,7 +1262,7 @@ flashlight.castShadow = true;
 flashlight.shadow.mapSize.set(1024, 1024);
 flashlight.shadow.camera.near = 0.2; flashlight.shadow.camera.far = 28;
 flashlight.shadow.bias = -0.0005;
-flashlight.position.set(0.2, -0.15, 0);
+flashlight.position.set(0.2, -0.165, -0.56);
 camera.add(flashlight);
 flashlight.target.position.set(0.1, -0.1, -5);
 camera.add(flashlight.target);
@@ -2269,7 +2322,7 @@ function onStart(msg) {
   game.gens = OBJ.map(() => ({ progress: 0, done: false }));
   buildRelics();
   me.hidden = -1; me.hideT = 0; me.hideCD = 0; me.stones = 3; me.throwCD = 0;
-  $('#hide-overlay').classList.add('hidden');
+  setHideView(-1);
   for (const p of msg.players) {
     if (p.id === me.id) {
       me.isMonster = p.isMonster; me.pos.set(p.x, 0, p.z); me.yaw = p.ry; me.pitch = 0;
@@ -2317,7 +2370,7 @@ function removeRemote(id) {
 }
 function leaveMatch() {
   for (const id of [...players.keys()]) removeRemote(id);
-  clearRelics(); me.hidden = -1; $('#hide-overlay').classList.add('hidden');
+  clearRelics(); me.hidden = -1; setHideView(-1);
   game.gateOpen = false;
   if (world.gate) world.gate.mesh.position.x = world.gate.x0;
 }
@@ -2503,7 +2556,7 @@ addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   keys[e.code] = true;
   if (game.phase !== 'playing') return;
-  if (e.code === 'KeyF' && !me.isMonster) { flashlightOn = !flashlightOn; flashlight.visible = flashlightOn && viewMode === 'survivor'; tone({ f: 1800, dur: 0.03, vol: 0.05 }); }
+  if (e.code === 'KeyF' && !me.isMonster) { flashlightOn = !flashlightOn; flashlight.visible = flashlightOn && viewMode === 'survivor' && !(me.hidden >= 0); tone({ f: 1800, dur: 0.03, vol: 0.05 }); }
   if (e.code === 'KeyQ') monsterSonar();
   if (e.code === 'KeyE' && !e.repeat) toggleHide();
   if (e.code === 'KeyG' && !e.repeat) throwStone();
@@ -2580,14 +2633,14 @@ function toggleHide() {
   if ([...players.values()].some((r) => r.hidden && Math.hypot(r.pos.x - LOCKERS[li].x, r.pos.z - LOCKERS[li].z) < 0.8)) { addFeed('Someone is already in there.', 'warn'); return; }
   const L = LOCKERS[li];
   me.hidden = li; me.pos.set(L.x, 0, L.z); me.yaw = L.ry; me.pitch = 0;
-  $('#hide-overlay').classList.remove('hidden');
+  setHideView(li);
   noise({ dur: 0.18, vol: 0.12, freq: 400, q: 1 });
 }
 function exitHide(forced) {
   if (me.hidden < 0) return;
   const f = lockerFront(LOCKERS[me.hidden], 0.95);
   me.pos.set(f.x, 0, f.z); me.hidden = -1; me.hideCD = HIDE_COOLDOWN;
-  $('#hide-overlay').classList.add('hidden');
+  setHideView(-1);
   noise({ dur: 0.2, vol: forced ? 0.4 : 0.12, freq: 350, q: 1 });
 }
 function throwStone() {
@@ -2679,7 +2732,7 @@ function updateLocal(dt) {
     me.hideT += dt; me.noise = 0; me.repairing = false; me.moving = false; me.crouch = false;
     let rel = me.yaw - L.ry; rel = ((rel + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
     me.yaw = L.ry + clamp(rel, -0.7, 0.7); me.pitch = clamp(me.pitch, -0.4, 0.4);
-    me.eye = damp(me.eye, 1.45, 10, dt);
+    me.eye = damp(me.eye, HIDE_TYPES[L.type] || 1.45, 10, dt);
     applyCamera(dt, 0);
     if (me.hideT >= HIDE_MAX) { exitHide(true); addFeed('You burst out, gasping for air.', 'bad'); }
     return;
@@ -2967,10 +3020,10 @@ const viewBody = { group: null, model: null, anim: null, hide: [], neck: new THR
 function setupViewBody() {
   if (!ASSETS.monster || viewBody.group) return;
   const model = SkeletonUtils.clone(ASSETS.monster.template);
-  const mat = makeSonarMaterial({ base: 0.09, gain: 1.0, grid: 1.6, near: 0, color: 0x7dffc0 });
+  const mat = makeSonarMaterial({ base: 0.42, gain: 1.0, grid: 1.6, near: 0, color: 0x9dffd0 }); // your own claws stay readable
   model.traverse((o) => {
     if (o.isMesh) { o.material = mat; o.frustumCulled = false; o.castShadow = false; }
-    if (o.isBone && /^(head_011|neck2_010|head_end)/.test(o.name)) viewBody.hide.push(o);
+    if (o.isBone && /^(head_011|neck2_010|head_end|hip_L_016|hip_R_020)/.test(o.name)) viewBody.hide.push(o); // head and legs fold away
     if (o.isBone && /^neck1_09/.test(o.name)) viewBody.neckBone = o;
     if (o.isBone && /^arm_L_06/.test(o.name)) viewBody.armL = o;
     if (o.isBone && /^arm_R_013/.test(o.name)) viewBody.armR = o;
@@ -2984,26 +3037,12 @@ function setupViewBody() {
 function updateViewBody(dt) {
   const vb = viewBody;
   if (!vb.group) return;
+  // First person: you see your own long arms and claws reaching into the bottom of the
+  // view (head and legs folded away). They sway as you walk and rake across on strikes.
   const show = me.isMonster && game.phase === 'playing' && me.status === 'alive' && viewMode === 'monster';
   vb.group.visible = show;
   if (!show) return;
-  vb.anim.update(dt, me.speedNow || 0);
-  for (const b of vb.hide) b.scale.setScalar(0.001);
-  // First-person claw rake: on a strike, swing one arm up into view and across.
-  const A = vb.anim, rake = A.shot && /^attack|jumpscare/.test(A.shot) ? A.shotT / A.shotLen : -1;
-  if (rake >= 0) {
-    if (A.shotT < 0.02) vb.side = vb.side === vb.armL ? vb.armR : vb.armL;
-    const k = Math.sin(Math.min(1, rake * 1.6) * Math.PI);          // up and back down
-    vb.group.updateMatrixWorld(true);
-    const right = _lAx.set(Math.cos(me.yaw), 0, -Math.sin(me.yaw));
-    const fwd = _v2.set(-Math.sin(me.yaw), 0, -Math.cos(me.yaw));
-    const arm = A.shot === 'jumpscare' ? null : (vb.side || vb.armR);
-    for (const b of arm ? [arm] : [vb.armL, vb.armR]) {
-      rotateBoneWorld(b, right, 1.9 * k);                              // lift forward into view
-      rotateBoneWorld(b, fwd, (b === vb.armL ? 1 : -1) * (rake - 0.3) * 1.4 * k); // sweep across
-    }
-  }
-  // Put the shoulders a little in front of and below the eyes, so the arms hang in view.
+  // Shoulders just in front of and below the eyes.
   const sin = Math.sin(me.yaw), cos = Math.cos(me.yaw);
   const nx = vb.neck.x, nz = vb.neck.z, ahead = 0.3;
   vb.group.rotation.y = me.yaw;
@@ -3012,6 +3051,69 @@ function updateViewBody(dt) {
     me.eye - 0.35 - vb.neck.y,
     me.pos.z - (-nx * sin + nz * cos) - cos * ahead,
   );
+  vb.group.updateMatrixWorld(true);
+  vb.anim.update(dt, me.speedNow || 0);
+  for (const b of vb.hide) b.scale.setScalar(0.001);
+  const right = _lAx.set(Math.cos(me.yaw), 0, -Math.sin(me.yaw));
+  const fwd = _v2.set(-Math.sin(me.yaw), 0, -Math.cos(me.yaw));
+  // Resting pose: arms lifted forward so the claws hang at the lower corners of the view,
+  // swinging with your stride and twitching now and then.
+  const stride = Math.sin(vb.stride = (vb.stride || 0) + dt * (me.speedNow || 0) * 1.4) * Math.min(1, (me.speedNow || 0) / 3);
+  for (const b of [vb.armL, vb.armR]) {
+    const s = b === vb.armL ? 1 : -1;
+    rotateBoneWorld(b, right, 1.25 + stride * 0.18 * s + Math.sin(time * 1.3 + s) * 0.03);
+    rotateBoneWorld(b, fwd, s * 0.5);
+  }
+  // Claw rake on a strike: one arm (both for a kill) swings up into view and across.
+  const A = vb.anim, rake = A.shot && /^attack|jumpscare/.test(A.shot) ? A.shotT / A.shotLen : -1;
+  if (rake >= 0) {
+    if (A.shotT < 0.02) vb.side = vb.side === vb.armL ? vb.armR : vb.armL;
+    const k = Math.sin(Math.min(1, rake * 1.6) * Math.PI);
+    const arm = A.shot === 'jumpscare' ? null : (vb.side || vb.armR);
+    for (const b of arm ? [arm] : [vb.armL, vb.armR]) {
+      rotateBoneWorld(b, right, 0.7 * k);
+      rotateBoneWorld(b, fwd, (b === vb.armL ? 1 : -1) * (rake - 0.3) * 1.4 * k);
+    }
+  }
+}
+
+// ---- Survivor's own hands: a flashlight in the right hand, the left hand low in view.
+const fpHands = new THREE.Group();
+(function buildHands() {
+  // A touch of self-light so your hands read against the dark (as if lit by the torch spill).
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc89d78, roughness: 0.7, emissive: 0x3a2618, emissiveIntensity: 0.6 });
+  const sleeve = new THREE.MeshStandardMaterial({ color: 0x2c3e4f, roughness: 0.9, emissive: 0x0e1418, emissiveIntensity: 0.6 });
+  const metal = new THREE.MeshStandardMaterial({ color: 0x1c1c1c, roughness: 0.4, metalness: 0.7 });
+  const arm = (side) => {
+    const g = new THREE.Group();
+    const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.42, 10), sleeve); fore.rotation.x = Math.PI / 2; fore.position.z = 0.16;
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.055, 0.11), skin); hand.position.z = -0.07;
+    const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.025, 0.06), skin); thumb.position.set(-side * 0.05, 0.015, -0.08); thumb.rotation.y = side * 0.5;
+    g.add(fore, hand, thumb);
+    return g;
+  };
+  const R = arm(1), L = arm(-1);
+  const torch = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.03, 0.2, 10), metal); torch.rotation.x = Math.PI / 2; torch.position.set(0, 0.035, -0.12);
+  const lens = new THREE.Mesh(new THREE.CircleGeometry(0.03, 12), new THREE.MeshBasicMaterial({ color: 0xfff4d6 })); lens.position.set(0, 0.035, -0.222); lens.rotation.y = Math.PI;
+  R.add(torch, lens); fpHands.userData.lens = lens;
+  R.position.set(0.2, -0.2, -0.32); R.rotation.set(0.12, 0.08, 0);
+  L.position.set(-0.24, -0.26, -0.36); L.rotation.set(0.25, -0.15, 0.3);
+  fpHands.add(R, L); fpHands.userData.R = R; fpHands.userData.L = L;
+  fpHands.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.renderOrder = 10; } });
+  camera.add(fpHands);
+})();
+function updateHands(dt) {
+  const show = !me.isMonster && game.phase === 'playing' && me.status === 'alive' && !(me.hidden >= 0) && !me.killCam && viewMode === 'survivor';
+  fpHands.visible = show;
+  if (!show) return;
+  const sp = Math.min(1, (me.speedNow || 0) / 6), t = me.bob || 0;
+  const { R, L } = fpHands.userData;
+  // Walk bob, sprint pump, and a startle jolt when hit.
+  R.position.set(0.2 + Math.sin(t * 0.5) * 0.012 * sp, -0.2 + Math.abs(Math.cos(t * 0.5)) * 0.015 * sp - (me.sprint ? 0.04 : 0), -0.32);
+  L.position.set(-0.24 - Math.sin(t * 0.5) * 0.012 * sp, -0.26 + Math.abs(Math.sin(t * 0.5)) * 0.015 * sp - (me.sprint ? 0.05 : 0), -0.36);
+  R.rotation.x = 0.12 + (me.flinch || 0) * 0.5; L.rotation.x = 0.25 + (me.flinch || 0) * 0.6 + (me.repairing ? -0.6 : 0);
+  L.position.y += me.repairing ? 0.08 : 0; L.position.x += me.repairing ? 0.12 : 0;
+  fpHands.userData.lens.material.color.setHex(flashlightOn && flashlight.intensity > 5 ? 0xfff4d6 : 0x222222);
 }
 
 function updateRemotes(dt) {
@@ -3442,7 +3544,7 @@ function animate() {
   if (game.phase === 'playing' || game.phase === 'ended') {
     if (game.phase === 'playing') updateLocal(dt);
     const { monsterDist, mon } = updateRemotes(dt);
-    updateViewBody(dt);
+    updateViewBody(dt); updateHands(dt);
     updateWorld(dt, monsterDist, mon);
     if (net.isHost) hostUpdate(dt);
     if (game.phase === 'playing') { sendState(dt); updateHUD(); }
@@ -3457,4 +3559,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, viewBody, ENV, heardNoise, ambientMask, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
+window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, viewBody, LOCKERS, nearLocker, ENV, heardNoise, ambientMask, hostUpdate, hostAttack, DEBUG, KILL, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };

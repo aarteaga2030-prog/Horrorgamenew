@@ -41,6 +41,21 @@ The forest is never quiet:
 - **Wind gusts:** every 20–45 s the wind rises for 5–10 s. The wind sound swells and the grass bends.
 - **Nothing is masked:** every sound, from a survivor, the forest or a thrown stone, sends a ring that travels all the way to the edges of the map, fading as it spreads. Crouching is quieter (a faint ring) but never hidden. The survivor HUD's noise bar shows how loud you are.
 
+### Hiding places
+Sixteen spots, each looked out of differently (your own hiding place is invisible to you and your flashlight goes off, so you watch through its gaps):
+- **Metal lockers:** main cabin, hunting cabin, chapel ×2.
+- **Wardrobes:** main cabin (west room), shed.
+- **Outhouses:** by the camp and by the tower.
+- **A crypt** in the graveyard, seen through its iron grille.
+- **The wrecked truck's cab**, seen through the windshield.
+- **Hollow logs:** near the stone circle and in the east woods. You lie low and look out of the end.
+- **Crates:** north, east, west and south-west woods.
+
+### First person
+Both roles see their own hands:
+- **Survivors:** the flashlight is in the right hand, and the hands bob with your stride, pump when you sprint, reach in when you repair and jolt when you're hit.
+- **The monster:** its long claws reach into the bottom of the view, swing with its stride, and rake across on strikes. Its head and legs are folded away so the view is clean.
+
 ### Survivor tools
 - **Hide (E):** step into a locker or outhouse. You make no sound and can't be seen or exposed, for up to 15 s of held breath (8 s to recover). The monster can still tear a hiding place open if it strikes it.
 - **Stones (G):** three per match. A stone lands 15 m ahead and clacks, a decoy noise the monster hears like any other.

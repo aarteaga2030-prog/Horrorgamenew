@@ -111,11 +111,20 @@ select { background: #0b110e; border: 1px solid var(--line); color: var(--text);
 select:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
 select:disabled { opacity: 0.6; }
 .mode-desc { margin: -6px 0 12px; min-height: 2.6em; }
-/* Peering out through the slats of a hiding place */
-#hide-overlay { position: fixed; inset: 0; z-index: 4; pointer-events: none;
+/* Looking out of a hiding place: each kind frames the view differently */
+#hide-overlay { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+#hide-overlay.hide-locker, #hide-overlay.hide-wardrobe, #hide-overlay.hide-outhouse, #hide-overlay.hide-crate {
   background:
-    linear-gradient(to right, rgba(0,0,0,0.98) 0 22%, transparent 22% 78%, rgba(0,0,0,0.98) 78% 100%),
-    linear-gradient(to bottom, rgba(0,0,0,0.98) 0 30%, transparent 30% 62%, rgba(0,0,0,0.98) 62% 100%),
-    repeating-linear-gradient(to bottom, rgba(0,0,0,0.97) 0 34px, transparent 34px 44px); }
-
-.title { font-family: 'Orbitron', 'Share Tech Mono', "Courier New", monospace; }
+    radial-gradient(ellipse 60% 45% at 50% 46%, transparent 55%, rgba(0,0,0,0.92) 100%),
+    repeating-linear-gradient(to bottom, rgba(6,5,4,0.88) 0 26px, transparent 26px 44px); }
+#hide-overlay.hide-crate { background:
+    radial-gradient(ellipse 60% 40% at 50% 50%, transparent 55%, rgba(0,0,0,0.92) 100%),
+    repeating-linear-gradient(to right, rgba(20,12,6,0.9) 0 46px, transparent 46px 70px); }
+#hide-overlay.hide-crypt { background:
+    radial-gradient(ellipse 55% 50% at 50% 48%, transparent 50%, rgba(0,0,0,0.94) 100%),
+    repeating-linear-gradient(to right, rgba(8,9,9,0.95) 0 10px, transparent 10px 64px); }
+#hide-overlay.hide-truck { background:
+    linear-gradient(to bottom, rgba(0,0,0,0.95) 0 14%, transparent 14% 60%, rgba(0,0,0,0.95) 60% 100%),
+    linear-gradient(to right, rgba(0,0,0,0.95) 0 6%, transparent 6% 94%, rgba(0,0,0,0.95) 94% 100%),
+    linear-gradient(100deg, transparent 40%, rgba(160,190,200,0.05) 50%, transparent 60%); }
+#hide-overlay.hide-log { background: radial-gradient(ellipse 34% 40% at 50% 52%, transparent 70%, rgba(14,9,5,0.97) 78%); }
