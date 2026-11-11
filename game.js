@@ -20,12 +20,12 @@ const CFG = {
   GEN_TIME: 14,           // seconds of solo repair per generator
   SURV_R: 0.35,
   MON_R: 0.45,
-  SPEED: { crouch: 1.8, walk: 3.4, sprint: 6.0, monster: 3.9, monsterSprint: 5.6 },
+  SPEED: { crouch: 1.8, walk: 3.4, sprint: 6.0, monster: 4.3, monsterSprint: 6.6 },
   NOISE: { crouch: 0.15, walk: 0.5, sprint: 1.0, repair: 0.55 },
   ATTACK_RANGE: 2.3,
   ATTACK_CD: 1.6,
-  SONAR_CD: 20,
-  SONAR_RANGE: 24,
+  SONAR_CD: 14,
+  SONAR_RANGE: 42,      // the shriek finds every unhidden survivor within this range
   HEARING: Infinity,      // a human monster hears any noise, anywhere on the map (silence is the only cover)
   BOT_HEARING: 24,        // the bot monster hears noise x this many metres, so bot matches stay winnable
   HIT_INVULN: 2.5,
@@ -2204,7 +2204,7 @@ function hostHandle(from, msg) {
     }
     case 'repair': hostRepair(p, msg.gen, msg.dt); break;
     case 'solve': hostSolve(p, msg.gen | 0); break;
-    case 'sonar': if (p?.isMonster) { hs.shriek = { x: p.x, z: p.z, t: time }; broadcast({ t: 'event', k: 'sonar', by: from, x: p.x, z: p.z }); } break;
+    case 'sonar': if (p?.isMonster && p.s === 'alive' && time - (p.lastShriek ?? -99) > CFG.SONAR_CD * 0.9) hostShriek(p); break;
     case 'escape': {
       if (!p || p.isMonster || p.s !== 'alive' || !hs.gateOpen) return;
       if (!inExit(p.x, p.z)) return;
@@ -2213,6 +2213,14 @@ function hostHandle(from, msg) {
       break;
     }
   }
+}
+// The sonar shriek: every survivor in range who isn't hidden is located and lit up.
+function hostShriek(p) {
+  p.lastShriek = time;
+  hs.shriek = { x: p.x, z: p.z, t: time };
+  const seen = Object.values(hs.players).filter((s) => !s.isMonster && s.s === 'alive' && !s.h && Math.hypot(s.x - p.x, s.z - p.z) < CFG.SONAR_RANGE).map((s) => [r2(s.x), r2(s.z), s.id]);
+  broadcast({ t: 'event', k: 'sonar', by: p.id, x: p.x, z: p.z, seen });
+  return seen;
 }
 function hostRemovePlayer(id) {
   net.conns.delete(id);
@@ -2484,7 +2492,7 @@ function updateSurvivorBot(p, dt) {
   const dm = mon ? Math.hypot(mon.x - p.x, mon.z - p.z) : Infinity;
   // ---- Perception (no cheating: only what this survivor could see or hear)
   const sees = mon && (dm < 4 || (mon.spd > 0.6 && dm < 14));
-  const hearsSteps = mon && mon.spd > 4 && dm < 22;                  // a charge is loud
+  const hearsSteps = mon && mon.spd > 4.7 && dm < 22;                  // a charge is loud
   const hearsShriek = hs.shriek && time - hs.shriek.t < 0.3 && Math.hypot(hs.shriek.x - p.x, hs.shriek.z - p.z) < 60;
   if (sees || hearsSteps) {
     const prevD = b.mem ? Math.hypot(b.mem.x - p.x, b.mem.z - p.z) : dm;
@@ -2500,7 +2508,7 @@ function updateSurvivorBot(p, dt) {
   // ---- Emergencies. It's blind, so a monster that is merely close usually doesn't know
   // we're here: creep away silently. Only sprint when it is charging right at us or has
   // just hit us, and only briefly (sprinting is what gives us away).
-  const charging = sees && mon.spd > 4.5 && b.mem?.closing && dm < 4;
+  const charging = sees && mon.spd > 4.9 && b.mem?.closing && dm < 4;
   const justHit = time - p.lastHit < 0.3;
   if (b.state !== 'evade' && mon && (justHit || (charging && time > (b.quietUntil || 0)))) {
     b.state = 'evade'; b.t = 1.1 + Math.random() * 0.6; botPathAway(p, b, mon, 10);
@@ -2609,7 +2617,7 @@ function updateSurvivorBot(p, dt) {
   if (botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt) && gd >= 2.3) botStep(p, b, CFG.SPEED[mode], CFG.SURV_R, dt, genPos(gi));
 }
 
-const MON_SPEED = { prowl: 2.4, stalk: 3.0, charge: 5.4 };
+const MON_SPEED = { prowl: 2.6, stalk: 3.3, charge: 6.2 };
 function updateMonsterBot(p, dt) {
   const b = p.bot;
   b.attackCD -= dt; b.sonarCD -= dt; b.hearT -= dt;
@@ -2735,8 +2743,7 @@ const lockerFront = (L, d = 1.0) => ({ x: L.x - Math.sin(L.ry) * d, z: L.z - Mat
 function shriekOrSweep(p, b, prey) {
   if (b.sonarCD <= 0) {
     b.sonarCD = 14;
-    hs.shriek = { x: p.x, z: p.z, t: time };
-    broadcast({ t: 'event', k: 'sonar', by: p.id, x: p.x, z: p.z });
+    hostShriek(p);
     let near = null, nd = CFG.SONAR_RANGE;
     for (const s of prey) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < nd) { nd = d; near = s; } }
     if (near) { b.lead = { x: near.x, z: near.z, t: time - 1.5 }; b.mode = 'stalk'; b.goalKey = ''; return; } // stalk, don't charge
@@ -2939,7 +2946,20 @@ function onEvent(e) {
     case 'sonar': {
       const sm = players.get(e.by)?.avatar.userData.monster;
       if (sm && sm.anim.shot !== 'jumpscare') sm.anim.play('hit', { len: 2.4, rate: 1.15 }); // convulsing shriek
-      if (e.by !== me.id) { addRipple(pos.setY(1.5), CFG.SONAR_RANGE, 1.3, 14); sfx.screech(distVol(pos, 60) + 0.2, panOf(pos)); if (!me.isMonster) addFeed('The creature shrieks…', 'warn'); if (viewMode === 'monster') monsterPost.pass.uniforms.uShock.value = 0.8; }
+      if (e.by !== me.id) { addRipple(pos.setY(1.5), CFG.SONAR_RANGE, 2.2, 20); sfx.screech(distVol(pos, 70) + 0.25, panOf(pos)); if (viewMode === 'monster') monsterPost.pass.uniforms.uShock.value = 0.8; }
+      // Everyone it found flares up when the wave reaches them, and stays lit for a few seconds.
+      const found = e.seen || [];
+      if (me.isMonster || viewMode === 'monster') {
+        for (const [x, z] of found) {
+          const delay = Math.hypot(x - e.x, z - e.z) / 20 * 1000;
+          setTimeout(() => { for (let k = 0; k < 3; k++) setTimeout(() => { if (game.phase === 'playing') addRipple(_v.set(x, 1.0, z), 8, 2.0 - k * 0.5, 16); }, k * 900); }, delay);
+        }
+        if (e.by === me.id) addFeed(found.length ? `Your shriek found ${found.length === 1 ? 'one of them' : found.length + ' of them'}.` : 'Your shriek finds nothing.', found.length ? 'good' : 'warn');
+      }
+      if (!me.isMonster && me.status === 'alive') {
+        if (found.some((f) => f[2] === me.id)) { me.damage = Math.max(me.damage, 0.5); addFeed('The shriek found you! It knows where you are. MOVE.', 'bad'); }
+        else addFeed(me.hidden >= 0 ? 'The creature shrieks… your hiding place kept you hidden.' : 'The creature shrieks…', 'warn');
+      }
       break;
     }
     case 'fix': {
@@ -3178,7 +3198,7 @@ function monsterAttack() {
 function monsterSonar() {
   if (!me.isMonster || me.status !== 'alive' || me.sonarCD > 0) return;
   me.sonarCD = CFG.SONAR_CD;
-  addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), CFG.SONAR_RANGE, 1.3, 14);
+  addRipple(new THREE.Vector3(me.pos.x, 1.5, me.pos.z), CFG.SONAR_RANGE, 2.2, 20);
   viewBody.anim?.play('hit', { len: 2.4, rate: 1.15 });
   monsterPost.pass.uniforms.uPulse.value = 1; monsterPost.pass.uniforms.uShock.value = 1;
   sfx.ping();
@@ -3503,7 +3523,7 @@ function updateLocal(dt) {
   if (me.stamina <= 0) me.exhausted = true;
   if (me.exhausted && me.stamina > 0.35) me.exhausted = false;
   me.sprint = wantSprint && !me.exhausted;
-  me.stamina = clamp(me.stamina + (me.sprint ? -dt / (me.isMonster ? 2.5 : 5) : dt * (me.isMonster ? (moving ? 0.1 : 0.18) : (moving ? 0.15 : 0.25))), 0, 1);
+  me.stamina = clamp(me.stamina + (me.sprint ? -dt / (me.isMonster ? 5.5 : 5) : dt * (me.isMonster ? (moving ? 0.16 : 0.28) : (moving ? 0.15 : 0.25))), 0, 1);
 
   let speed;
   if (me.isMonster) speed = me.sprint ? CFG.SPEED.monsterSprint : CFG.SPEED.monster;
@@ -4154,7 +4174,7 @@ function updateScares(dt, d, mon) {
   scare.breathT -= dt;
   if (d < 9 && scare.breathT <= 0) { scare.breathT = 2.3; sfx.breath(distVol(mon.pos, 10) * 0.6, pan); }
   // Pulse when it is charging you
-  const chasing = mon.speed > 4.3 && d < 16;
+  const chasing = mon.speed > 4.8 && d < 16;
   scare.chase = damp(scare.chase, chasing ? 1 : 0, chasing ? 4 : 0.7, dt);
   scare.chaseT -= dt;
   if (scare.chase > 0.3 && scare.chaseT <= 0) { scare.chaseT = 0.3; sfx.chase(scare.chase); }

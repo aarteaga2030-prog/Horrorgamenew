@@ -81,16 +81,16 @@ Both roles see their own hands:
 | Goal | Restore 4 of the 5 generators (**E** opens a generator's pipe puzzle) to open the exit gate, then escape. Or stay alive until the 5:30 timer runs out. | Catch every survivor (2 hits each). |
 | Sees | A moonlit forest, plus a flashlight (**F**). | A dim green grid of light cast from its own eyes. Everything looks the same until sound lights it up. |
 | Movement | **WASD** / arrows. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** / arrows. **Shift** charge (on all fours). |
-| Abilities | Working a generator hums, and each restored circuit clangs. | **LMB** or **Space** strike (also rips a circuit out of a half-wired generator). **Q** / **RMB** sonar shriek (reveals everything nearby; survivors hear it). |
+| Abilities | Working a generator hums, and each restored circuit clangs. | **LMB** or **Space** strike (also rips a circuit out of a half-wired generator). **Q** / **RMB** sonar shriek (lights up every unhidden survivor within 42 m; survivors hear it). |
 
 **Looking around:** click the game to lock the mouse cursor. If the browser won't allow pointer lock, or on a touch screen, drag across the screen to look instead. Touch is only for looking; movement and actions always come from the keyboard.
 
 ### Balance
 Survivors can outplay a human monster:
-- **Speed:** the monster walks slower than a survivor (3.9 vs 3.4 walk, but survivors sprint at 6.0 against its 5.6 charge). Its charge lasts 2.5 s against a survivor's 5 s sprint, and its stamina recovers more slowly.
+- **Speed:** the monster walks faster than a survivor (4.3 vs 3.4) and its all-fours charge (6.6) outruns a survivor's sprint (6.0). Its charge lasts 5.5 s and recovers quickly, so survivors have to break line of sound (hide, crouch, decoy) rather than outrun it.
 - **Hearing:** a human monster hears any noise from anywhere on the map. Louder movement makes bigger, more frequent ripples; only standing still, hiding, or a thrown stone elsewhere covers you. The bot monster is limited to range (sprinting ≈ 24 m, walking ≈ 12 m, crouching ≈ 3.6 m), because with unlimited hearing it took every bot survivor in every test match.
 - **Strike:** reach 2.3 m and a 1.6 s cooldown. After a hit, the survivor gets a 3 s speed boost and 2.5 s of invulnerability.
-- **Shriek:** reaches 24 m, on a 20 s cooldown.
+- **Shriek:** finds every survivor within 42 m who isn't hidden, on a 14 s cooldown. Each one flares up in monster vision as the wave reaches them and stays lit for a few seconds, and they're warned that it found them. Hiding places protect you.
 - **Sabotage:** a strike on a half-wired generator undoes one circuit, at most once every 18 s per generator.
 - **Camouflage:** builds only after 1.2 s of stillness, never goes fully invisible (a faint shimmer remains), and a survivor's flashlight beam on it within 14 m breaks it.
 
@@ -116,7 +116,7 @@ A fenced, 120 m square of night forest:
 
 **Camouflage:**
 - **Monster:** standing still makes it drop into a listening crouch and fade out completely for survivors, shadow included. The monster's HUD shows when it is hidden.
-- **Survivors:** in monster vision, survivors are drawn exactly like everything else, in the same dim grid with no outline or highlight. A still, silent survivor is just more surface. They only stand out when sound passes over them: their own noise, the monster's footsteps, or its sonar shriek (a 30 m wave).
+- **Survivors:** in monster vision, survivors are drawn exactly like everything else, in the same dim grid with no outline or highlight. A still, silent survivor is just more surface. They only stand out when sound passes over them: their own noise, the monster's footsteps, or its sonar shriek (a 42 m wave that lights up everyone it finds).
 
 **Kills:** the monster rears up and slams its claws down, and the survivor falls backward. A survivor who is taken sees it in first person: they're turned to face the monster, then collapse to the floor. The match result waits until the final kill has played out.
 
