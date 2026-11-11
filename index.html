@@ -1,9 +1,69 @@
 <!doctype html>
 <html lang="en">
 <head>
+<script>(function(){
+try{
+var W=window;
+function make(){
+var d=Object.create(null);
+var api={
+getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null;},
+setItem:function(k,v){d[String(k)]=String(v);},
+removeItem:function(k){delete d[String(k)];},
+clear:function(){d=Object.create(null);},
+key:function(i){var ks=Object.keys(d);i=Math.floor(Number(i))||0;return i>=0&&i<ks.length?ks[i]:null;}
+};
+if(typeof Proxy!=='function'){try{Object.defineProperty(api,'length',{get:function(){return Object.keys(d).length;}});}catch(e){}return api;}
+return new Proxy(api,{
+get:function(t,p,r){
+if(p==='length')return Object.keys(d).length;
+if(typeof p!=='string')return Reflect.get(t,p,r);
+if(Object.prototype.hasOwnProperty.call(t,p))return t[p];
+return Object.prototype.hasOwnProperty.call(d,p)?d[p]:undefined;
+},
+set:function(t,p,v){
+if(typeof p==='string'&&!Object.prototype.hasOwnProperty.call(t,p))d[p]=String(v);
+return true;
+},
+has:function(t,p){
+return (typeof p==='string'&&Object.prototype.hasOwnProperty.call(d,p))||p in t;
+},
+deleteProperty:function(t,p){if(typeof p==='string')delete d[p];return true;},
+ownKeys:function(){return Object.keys(d);},
+getOwnPropertyDescriptor:function(t,p){
+if(typeof p==='string'&&Object.prototype.hasOwnProperty.call(d,p))
+return {value:d[p],writable:true,enumerable:true,configurable:true};
+return undefined;
+}
+});
+}
+function usable(name){
+try{
+var real=W[name];
+if(!real)return false;
+var pk='__fdy_probe__';
+real.setItem(pk,'1');
+var back=real.getItem(pk);
+real.removeItem(pk);
+return back==='1';
+}catch(e){return false;}
+}
+function install(name){
+if(usable(name))return true;
+var s=make();
+var desc={value:s,configurable:true,enumerable:true,writable:false};
+try{Object.defineProperty(W,name,desc);if(W[name]===s)return true;}catch(e){}
+try{Object.defineProperty(Window.prototype,name,desc);if(W[name]===s)return true;}catch(e){}
+return false;
+}
+install('localStorage');
+install('sessionStorage');
+}catch(e){}
+})();</script>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Blindsight</title>
+  <link rel="stylesheet" href="https://ideabosco.com/_platform/fonts.css">
   <link rel="stylesheet" href="style.css" />
   <!-- PeerJS (global `Peer`) -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -26,6 +86,15 @@
       <h1 class="title">BLINDSIGHT</h1>
       <p class="tagline">It cannot see you. It can hear you.</p>
 
+      <label for="mode-select">Game mode
+        <select id="mode-select">
+          <option value="escape">Escape</option>
+          <option value="ritual">Ritual</option>
+          <option value="survive">Last Light</option>
+        </select>
+      </label>
+      <p id="mode-desc" class="muted mode-desc"></p>
+
       <div id="menu-main">
         <label for="name-input">Your name <input id="name-input" maxlength="16" placeholder="Survivor" /></label>
 
@@ -35,7 +104,7 @@
             <button id="btn-bot-survivor" class="primary" disabled>Play as survivor</button>
             <button id="btn-bot-monster" class="primary" disabled>Play as monster</button>
           </div>
-          <p class="muted">As survivor you face a bot monster that hunts by sound. As monster you hunt two bot survivors.</p>
+          <p class="muted">As survivor you face a bot monster that hunts by sound. As monster you hunt two bot survivors. Both use the game mode above.</p>
         </div>
 
         <div class="group" id="online-group">
@@ -78,14 +147,14 @@
         <div class="cols">
           <div>
             <h3>Survivors</h3>
-            <p>Repair all <b>3 generators</b> (hold <kbd>E</kbd>) to open the exit gate, then escape. Or stay alive until the timer runs out.</p>
-            <p>Every step makes noise. <kbd>C</kbd> crouch is nearly silent, <kbd>Shift</kbd> sprinting is loud. Repairing hums.</p>
-            <p><kbd>F</kbd> flashlight. Two hits and you're taken.</p>
+            <p>Restore <b>4 of the 5 generators</b> to power the exit gate, then escape. Or stay alive until the timer runs out.</p>
+            <p>Press <kbd>E</kbd> at a generator to open its panel and drag pipes between matching valves without crossing them. Each panel restores a circuit (2 or 3 per generator). The work hums, and every restored circuit clangs loud enough for it to hear.</p>
+            <p>Every step makes noise. <kbd>C</kbd> crouch is quiet, <kbd>Shift</kbd> sprinting is loud. <kbd>F</kbd> flashlight. <kbd>E</kbd> hides you in lockers, tents and outhouses for as long as you can hold your breath. <kbd>G</kbd> throws a stone as a decoy. Two hits and you're taken.</p>
           </div>
           <div>
             <h3>The Monster</h3>
             <p>You are blind. A dim grid of light shines from your eyes, and everything looks the same in it, survivors included. Sound lights things up: footsteps send out ripples across the lines.</p>
-            <p>Stand still and you fade into the background for survivors. <kbd>LMB</kbd> or <kbd>Space</kbd> attack · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> charge.</p>
+            <p>Stand still and you fade into the background for survivors. <kbd>LMB</kbd> or <kbd>Space</kbd> attack (strike a half-wired generator to rip a circuit out) · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> drop to all fours and charge. The ring around your view points to every sound you hear.</p>
           </div>
         </div>
         <p class="muted"><kbd>WASD</kbd> or arrow keys move. Look with the mouse (click to lock the cursor), or drag on the screen to look with a mouse or touch. <kbd>V</kbd> toggles monster vision while spectating.</p>
@@ -108,7 +177,9 @@
     <div id="hud-survivor" class="hud-box hidden">
       <div class="stat"><span>Health</span><span id="hp-pips"></span></div>
       <div class="stat"><span>Stamina</span><div class="bar"><div id="stamina-fill"></div></div></div>
-      <div class="stat"><span>Noise</span><div class="bar noise"><div id="noise-fill"></div></div></div>
+      <div class="stat"><span id="noise-label">Noise</span><div class="bar noise"><div id="noise-fill"></div></div></div>
+      <div class="stat hidden" id="breath-row"><span>Breath</span><div class="bar"><div id="breath-fill"></div></div></div>
+      <div class="stat"><span>Stones (G)</span><span id="stone-count">3</span></div>
     </div>
 
     <div id="hud-monster" class="hud-box hidden">
@@ -120,6 +191,16 @@
     </div>
   </div>
 
+  <div id="hide-overlay" class="hidden"></div>
+  <canvas id="sonar-hud" class="hidden"></canvas>
+  <!-- Generator panel: connect the matching valves -->
+  <div id="pipe-ui" class="hidden">
+    <div class="pipe-panel">
+      <div class="pipe-head"><span id="pipe-title">GENERATOR</span><span id="pipe-pips"></span></div>
+      <canvas id="pipe-canvas"></canvas>
+      <div class="pipe-foot"><span id="pipe-status">Connect each pair of matching valves.</span><span><kbd>E</kbd> or move: step away</span></div>
+    </div>
+  </div>
   <div id="resume" class="hidden"><div>Click to resume</div></div>
 
   <div id="endscreen" class="screen hidden">

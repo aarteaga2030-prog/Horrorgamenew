@@ -12,7 +12,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
-  font-family: "Courier New", ui-monospace, monospace; }
+  font-family: 'Share Tech Mono', "Courier New", ui-monospace, monospace; }
 canvas#game { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
 .hidden { display: none !important; }
 
@@ -106,3 +106,44 @@ kbd { border: 1px solid var(--line); padding: 0 4px; font-size: 11px; background
 #fatal button { display: block; margin: 12px auto 0; }
 .end-actions { justify-content: center; margin-top: 12px; }
 #btn-lobby-menu { margin-top: 8px; }
+
+select { background: #0b110e; border: 1px solid var(--line); color: var(--text); padding: 10px 12px; font: inherit; outline: none; }
+select:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+select:disabled { opacity: 0.6; }
+.mode-desc { margin: -6px 0 12px; min-height: 2.6em; }
+/* Looking out of a hiding place: each kind frames the view differently */
+#hide-overlay { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+#hide-overlay.hide-locker, #hide-overlay.hide-wardrobe, #hide-overlay.hide-outhouse, #hide-overlay.hide-crate {
+  background:
+    radial-gradient(ellipse 60% 45% at 50% 46%, transparent 55%, rgba(0,0,0,0.92) 100%),
+    repeating-linear-gradient(to bottom, rgba(6,5,4,0.88) 0 26px, transparent 26px 44px); }
+#hide-overlay.hide-crate { background:
+    radial-gradient(ellipse 60% 40% at 50% 50%, transparent 55%, rgba(0,0,0,0.92) 100%),
+    repeating-linear-gradient(to right, rgba(20,12,6,0.9) 0 46px, transparent 46px 70px); }
+#hide-overlay.hide-crypt { background:
+    radial-gradient(ellipse 55% 50% at 50% 48%, transparent 50%, rgba(0,0,0,0.94) 100%),
+    repeating-linear-gradient(to right, rgba(8,9,9,0.95) 0 10px, transparent 10px 64px); }
+#hide-overlay.hide-truck { background:
+    linear-gradient(to bottom, rgba(0,0,0,0.95) 0 14%, transparent 14% 60%, rgba(0,0,0,0.95) 60% 100%),
+    linear-gradient(to right, rgba(0,0,0,0.95) 0 6%, transparent 6% 94%, rgba(0,0,0,0.95) 94% 100%),
+    linear-gradient(100deg, transparent 40%, rgba(160,190,200,0.05) 50%, transparent 60%); }
+#hide-overlay.hide-log { background: radial-gradient(ellipse 34% 40% at 50% 52%, transparent 70%, rgba(14,9,5,0.97) 78%); }
+#hide-overlay.hide-tent { background:
+    linear-gradient(108deg, rgba(24,26,17,0.97) 0 31%, transparent 31.5%),
+    linear-gradient(-108deg, rgba(24,26,17,0.97) 0 31%, transparent 31.5%),
+    radial-gradient(ellipse 60% 55% at 50% 62%, transparent 50%, rgba(0,0,0,0.92) 100%); }
+
+/* Generator panel (pipe puzzle) */
+#pipe-ui { position: fixed; inset: 0; z-index: 7; display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: radial-gradient(ellipse at center, rgba(0,0,0,0.2), rgba(0,0,0,0.78)); }
+.pipe-panel { padding: 12px 14px 10px; background: linear-gradient(#1b221e, #0b0f0d); border: 1px solid #3a4a40; border-radius: 6px;
+  box-shadow: 0 0 0 3px #070908, 0 12px 50px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06); max-width: 100%; }
+.pipe-head, .pipe-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 12px; }
+.pipe-head { color: var(--amber); letter-spacing: 0.15em; margin-bottom: 8px; }
+.pipe-foot { color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+#pipe-status { color: var(--text); }
+#pipe-pips span { display: inline-block; width: 12px; height: 12px; margin-left: 5px; border: 1px solid var(--green); }
+#pipe-pips span.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+#pipe-canvas { display: block; width: min(400px, 82vw, 60vh); height: min(400px, 82vw, 60vh); touch-action: none; cursor: crosshair; border-radius: 3px; }
+/* Monster: sound compass ring */
+#sonar-hud { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 4; pointer-events: none; }
