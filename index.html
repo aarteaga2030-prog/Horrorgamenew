@@ -147,14 +147,14 @@ install('sessionStorage');
         <div class="cols">
           <div>
             <h3>Survivors</h3>
-            <p>Repair all <b>3 generators</b> (hold <kbd>E</kbd>) to open the exit gate, then escape. Or stay alive until the timer runs out.</p>
-            <p>Every step makes noise. <kbd>C</kbd> crouch is nearly silent (fully masked near the creek, the fire, a running generator, or when the wind gusts), <kbd>Shift</kbd> sprinting is loud. Repairing hums.</p>
-            <p><kbd>F</kbd> flashlight. <kbd>E</kbd> hides you in lockers and outhouses for as long as you can hold your breath. <kbd>G</kbd> throws a stone as a decoy. Two hits and you're taken.</p>
+            <p>Restore <b>4 of the 5 generators</b> to power the exit gate, then escape. Or stay alive until the timer runs out.</p>
+            <p>Press <kbd>E</kbd> at a generator to open its panel and drag pipes between matching valves without crossing them. Each panel restores a circuit (2 or 3 per generator). The work hums, and every restored circuit clangs loud enough for it to hear.</p>
+            <p>Every step makes noise. <kbd>C</kbd> crouch is quiet, <kbd>Shift</kbd> sprinting is loud. <kbd>F</kbd> flashlight. <kbd>E</kbd> hides you in lockers, tents and outhouses for as long as you can hold your breath. <kbd>G</kbd> throws a stone as a decoy. Two hits and you're taken.</p>
           </div>
           <div>
             <h3>The Monster</h3>
             <p>You are blind. A dim grid of light shines from your eyes, and everything looks the same in it, survivors included. Sound lights things up: footsteps send out ripples across the lines.</p>
-            <p>Stand still and you fade into the background for survivors. <kbd>LMB</kbd> or <kbd>Space</kbd> attack · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> charge.</p>
+            <p>Stand still and you fade into the background for survivors. <kbd>LMB</kbd> or <kbd>Space</kbd> attack (strike a half-wired generator to rip a circuit out) · <kbd>Q</kbd>/<kbd>RMB</kbd> sonar shriek (reveals everything nearby, but survivors hear it) · <kbd>Shift</kbd> drop to all fours and charge. The ring around your view points to every sound you hear.</p>
           </div>
         </div>
         <p class="muted"><kbd>WASD</kbd> or arrow keys move. Look with the mouse (click to lock the cursor), or drag on the screen to look with a mouse or touch. <kbd>V</kbd> toggles monster vision while spectating.</p>
@@ -192,6 +192,15 @@ install('sessionStorage');
   </div>
 
   <div id="hide-overlay" class="hidden"></div>
+  <canvas id="sonar-hud" class="hidden"></canvas>
+  <!-- Generator panel: connect the matching valves -->
+  <div id="pipe-ui" class="hidden">
+    <div class="pipe-panel">
+      <div class="pipe-head"><span id="pipe-title">GENERATOR</span><span id="pipe-pips"></span></div>
+      <canvas id="pipe-canvas"></canvas>
+      <div class="pipe-foot"><span id="pipe-status">Connect each pair of matching valves.</span><span><kbd>E</kbd> or move: step away</span></div>
+    </div>
+  </div>
   <div id="resume" class="hidden"><div>Click to resume</div></div>
 
   <div id="endscreen" class="screen hidden">
