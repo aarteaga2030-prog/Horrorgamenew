@@ -350,6 +350,10 @@ const SONAR_VERT = /* glsl */ `
   #include <skinning_pars_vertex>
   varying vec3 vWorld;
   varying vec3 vNormalW;
+  #ifdef SWAY
+    uniform float uTime;
+    attribute float aSway;  // 0 at the root of a grass blade, 1 at its tip
+  #endif
   void main() {
     #include <beginnormal_vertex>
     #include <skinbase_vertex>
@@ -357,15 +361,27 @@ const SONAR_VERT = /* glsl */ `
     #include <begin_vertex>
     #include <skinning_vertex>
     vec4 wp = modelMatrix * vec4(transformed, 1.0);
+    #ifdef SWAY
+      wp.x += sin(uTime * 1.3 + wp.x * 0.35 + wp.z * 0.25) * 0.09 * aSway;
+      wp.z += cos(uTime * 1.1 + wp.x * 0.2) * 0.05 * aSway;
+    #endif
     vWorld = wp.xyz;
     vNormalW = normalize(mat3(modelMatrix) * objectNormal);
     gl_Position = projectionMatrix * viewMatrix * wp;
   }`;
-// The monster "sees" by a grid of light cast from its own eyes: the lines are laid out
-// by viewing angle (yaw/pitch from the camera), not on each surface, so they run
-// unbroken across trees, ground and bodies alike, with no perspective foreshortening.
-// Brightness has no distance falloff and no shading, so depth is hard to judge; only
-// sound (expanding ripples) makes surfaces stand out from one another.
+// ECHO VISION. The monster "sees" by a faint grid of light cast from its own eyes: the
+// lines are laid out by viewing angle (yaw/pitch from the camera), not on each surface,
+// so in silence they run unbroken across trees, ground and bodies alike and nothing has
+// depth or shape. Sound is what gives the world form:
+//  - the wavefront: a white-hot shell racing out from the noise;
+//  - resonance: a surface keeps ringing for a moment after the front passes, then fades;
+//  - while it rings, it shows contour rings around the source (lines of equal distance,
+//    which bend over the shape of whatever they land on), and surfaces that face the
+//    sound echo harder than ones turned away, so ridges, trunks and walls read as solid.
+// Bodies get no glow, outline or colour of their own. A passing sound just draws its
+// ripple rings over them tighter and brighter (uRingScale, uRingGain) and holds them a
+// little longer, so the rings visibly wrap around a figure instead of crossing it in a
+// couple of frames. A silent body is still just more grid.
 const SONAR_FRAG = /* glsl */ `
   uniform float uTime;
   uniform vec3 uCamPos;
@@ -375,63 +391,86 @@ const SONAR_FRAG = /* glsl */ `
   uniform float uGain;      // how strongly ripples light this surface
   uniform float uGrid;      // grid spacing in degrees of view angle
   uniform float uNearGain;  // faint "touch" sense right around the monster
+  uniform float uHold;      // seconds a surface keeps ringing after a wavefront passes
+  uniform float uRingScale; // contour ring spacing multiplier (bodies use tighter rings)
+  uniform float uRingGain;  // contour ring brightness
+  uniform float uRingFace;  // 1 = rings dim on surfaces turned away from the sound; 0 = even
+  uniform float uRingQuiet; // sounds at or below this strength draw no rings here (0 = all do)
   uniform vec3 uColor;
   varying vec3 vWorld;
   varying vec3 vNormalW;
 
-  // Anti-aliased grid line for an angular coordinate, safe across the atan wrap.
-  float angLine(float a, float a2) {
+  // Anti-aliased line for a coordinate measured in "line units" (one line per 1.0).
+  float aaLine(float a, float a2, float px) {
     float w = min(fwidth(a), fwidth(a2));
     float g = abs(fract(a - 0.5) - 0.5) / max(w, 1e-4);
-    return 1.0 - min(g, 1.0);
+    return 1.0 - smoothstep(0.0, px, g);
   }
+  float hash3(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
 
   void main() {
-    vec3 dir = normalize(vWorld - uCamPos);
+    vec3 toCam = uCamPos - vWorld;
+    vec3 dir = normalize(-toCam);
     float yaw = degrees(atan(dir.x, dir.z)) / uGrid;            // -180..180 degrees
     float yaw2 = degrees(atan(-dir.x, -dir.z)) / uGrid;         // same lines, seam on the other side
     float pitch = degrees(asin(clamp(dir.y, -1.0, 1.0))) / uGrid;
-    float lines = max(angLine(yaw, yaw2), angLine(pitch, pitch));
+    float lines = max(aaLine(yaw, yaw2, 1.0), aaLine(pitch, pitch, 1.0));
+    vec3 N = normalize(vNormalW);
+    if (!gl_FrontFacing) N = -N;
+    float dpx = length(fwidth(vWorld));            // world metres per pixel here (derivatives stay outside the loop)
 
-    // Each sound is a sphere of light: a razor-thin white-hot wavefront, the main band
-    // behind it, two fading echoes trailing after, and a faint afterglow inside.
-    float energy = 0.0, hot = 0.0;
+    float energy = 0.0, hot = 0.0, contour = 0.0;
     for (int i = 0; i < MAXR; i++) {
       vec4 r = uRip[i];
       vec3 p = uRipP[i];
       float age = uTime - r.w;
       if (age < 0.0 || p.y <= 0.0) continue;
-      float rad = age * p.z;
-      if (rad > p.x) continue;
-      float d = distance(vWorld, r.xyz), x = d - rad;
+      float d = distance(vWorld, r.xyz);
+      if (d > p.x) continue;                       // beyond this sound's reach
+      float rad = age * p.z, x = d - rad;
       if (x > 1.6) continue;                       // the wave hasn't reached here yet
-      float w = 0.3 + rad * 0.06;
-      float ring = exp(-x * x / (w * w));
-      float echo = exp(-pow((x + w * 3.2) / (w * 1.4), 2.0)) * 0.3 + exp(-pow((x + w * 7.5) / (w * 2.2), 2.0)) * 0.13;
-      float ew = 0.05 + rad * 0.004;
+      float tp = max(-x, 0.0) / p.z;               // seconds since the front passed here
+      if (tp > uHold * 4.0) continue;              // finished ringing
+      float fade = 1.0 - d / p.x;
+      fade *= fade * p.y;
+      // the travelling front: a broad band plus a razor-thin leading edge
+      float w = 0.3 + d * 0.05;
+      float front = exp(-x * x / (w * w));
+      float ew = 0.05 + d * 0.004;
       float edge = exp(-x * x / (ew * ew));
-      float fill = (1.0 - smoothstep(0.0, rad + 0.001, d)) * 0.06;
-      float fade = 1.0 - rad / p.x;
-      fade *= fade;
-      energy += (ring + echo + fill) * fade * p.y;
-      hot += edge * fade * p.y;
+      // resonance left behind it
+      float mem = exp(-tp / uHold) * smoothstep(0.4, -0.2, x);
+      // contour rings of equal distance from the sound, drifting slowly outward
+      float cs = (0.8 + d * 0.025) * uRingScale;
+      float cv = (d - age * 0.9) / cs;
+      float cl = 1.0 - smoothstep(0.0, 1.4, abs(fract(cv - 0.5) - 0.5) * cs / max(dpx, 1e-4));
+      // surfaces turned toward the sound echo harder
+      float face = 0.3 + 0.7 * max(dot(N, normalize(r.xyz - vWorld)), 0.0);
+      energy += (front * 0.85 + mem * 0.09) * fade * mix(1.0, face, 0.7);
+      float loud = uRingQuiet > 0.0 ? smoothstep(uRingQuiet, 1.0, p.y) : 1.0;  // quiet sounds leave no rings
+      contour += cl * mem * fade * loud * mix(1.0, face, uRingFace);
+      hot += edge * fade;
     }
     // glitter where the wavefront passes
-    float spark = step(0.9, fract(sin(dot(floor(vWorld * 7.0) + floor(uTime * 14.0), vec3(12.9898, 78.233, 37.719))) * 43758.5453));
+    float spark = step(0.9, hash3(floor(vWorld * 7.0) + floor(uTime * 14.0)));
     hot *= 0.65 + spark * 1.7;
-    float near = (1.0 - smoothstep(0.0, 5.0, distance(vWorld, uCamPos))) * uNearGain;
+    float near = (1.0 - smoothstep(0.0, 5.0, length(toCam))) * uNearGain;
     float I = uBase + energy * uGain + near;
     float H = min(hot * uGain, 3.0);
-    vec3 col = uColor * (lines * I * 1.8 + I * 0.04) + mix(uColor, vec3(0.78, 1.0, 0.96), 0.75) * H * (0.22 + lines * 1.2);
+    vec3 white = mix(uColor, vec3(0.78, 1.0, 0.96), 0.75);
+    vec3 col = uColor * (lines * I * 1.8 + I * 0.05) + uColor * min(contour * uGain, 1.5) * uRingGain
+             + white * H * (0.22 + lines * 1.2);
     col = mix(col, vec3(dot(col, vec3(0.33))) * vec3(0.82, 1.0, 1.0), clamp(I - 1.1, 0.0, 0.5)); // the loudest sounds bleach toward white
     gl_FragColor = vec4(col, 1.0);
   }`;
-function makeSonarMaterial({ base, gain, grid, near, color }) {
+function makeSonarMaterial({ base, gain, grid, near, color, hold = 0.55, ringScale = 1, ringGain = 0.6, ringFace = 1, ringQuiet = 0, sway = false }) {
   return new THREE.ShaderMaterial({
-    defines: { MAXR: CFG.MAX_RIPPLES },
+    defines: sway ? { MAXR: CFG.MAX_RIPPLES, SWAY: 1 } : { MAXR: CFG.MAX_RIPPLES },
+    side: sway ? THREE.DoubleSide : THREE.FrontSide,
     uniforms: Object.assign({}, sonarShared, {
       uBase: { value: base }, uGain: { value: gain }, uGrid: { value: grid },
       uNearGain: { value: near }, uColor: { value: new THREE.Color(color) },
+      uHold: { value: hold }, uRingScale: { value: ringScale }, uRingGain: { value: ringGain }, uRingFace: { value: ringFace }, uRingQuiet: { value: ringQuiet },
     }),
     vertexShader: SONAR_VERT,
     fragmentShader: SONAR_FRAG,
@@ -440,11 +479,16 @@ function makeSonarMaterial({ base, gain, grid, near, color }) {
 const SONAR_MATS = {
   env: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0, color: 0x2bff7a }),
   gen: makeSonarMaterial({ base: 0.2, gain: 1.0, grid: 1.6, near: 0, color: 0xb4ff3b }),   // objectives faintly visible
+  // Bodies: the same faint grid and colour as the world, with no glow or outline. Quiet
+  // sounds (a crouched step, the monster's own footfalls) leave them exactly like the world.
+  // Louder ones draw their ripple rings on them a little tighter and evenly all the way round,
+  // so a walking or sprinting survivor is faintly traced as the sound passes.
+  entity: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0, color: 0x2bff7a, hold: 0.55, ringScale: 0.55, ringGain: 0.75, ringFace: 0, ringQuiet: 0.45 }),
+  grass: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0, color: 0x2bff7a, sway: true }), // tall grass, swaying
 };
-SONAR_MATS.entity = SONAR_MATS.env; // players get no special treatment: same light, same lines
 // A shell around the world, seen only in monster vision, carries the same grid past the
 // treetops so nothing stands out as a silhouette against an empty sky.
-const monsterSky = new THREE.Mesh(new THREE.SphereGeometry(190, 32, 16), makeSonarMaterial({ base: 0.035, gain: 0, grid: 1.6, near: 0, color: 0x2bff7a }));
+const monsterSky = new THREE.Mesh(new THREE.SphereGeometry(190, 32, 16), makeSonarMaterial({ base: 0.035, gain: 0, grid: 1.6, near: 0, color: 0x2bff7a, hold: 0.01 }));
 monsterSky.material.side = THREE.BackSide;
 monsterSky.frustumCulled = false;
 
@@ -1507,6 +1551,56 @@ function buildRelics() {
     reg(g, 'gen'); scene.add(g); world.relics[i] = g;
   });
 }
+// ---- Tall grass: meadows of shoulder-high grass (1.3-1.9 m). It isn't solid, but it hides
+// whoever is in it: a crouched survivor disappears into it, and in monster vision its blades
+// catch the sound ripples in front of anyone inside, so the rings break up over a body.
+const TALL_GRASS = []; // [x, z, radius] of each meadow
+function inTallGrass(x, z) { return TALL_GRASS.some(([gx, gz, r]) => Math.hypot(x - gx, z - gz) < r * 0.85); }
+function buildTallGrass(rng, crowded) {
+  const mat = stdMat({ color: 0x6d7a48, side: THREE.DoubleSide, roughness: 1 });
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = atmo.uTime; sh.uniforms.uGust = atmo.uGust;
+    sh.vertexShader = 'uniform float uTime;\nuniform float uGust;\nattribute float aSway;\n' + sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec4 gw = modelMatrix * vec4(transformed, 1.0);\n transformed.x += sin(uTime * 1.3 + gw.x * 0.35 + gw.z * 0.25) * (0.09 + uGust * 0.2) * aSway;\n transformed.z += cos(uTime * 1.1 + gw.x * 0.2) * 0.05 * aSway;');
+  };
+  // A few meadows hug the creek banks; the rest are scattered through the forest.
+  const spots = [];
+  for (let i = 0; i < 6; i++) { const k = 1 + Math.floor(rng() * (CREEK.length - 3)), t = rng(), side = rng() < 0.5 ? -1 : 1;
+    const [ax, az] = CREEK[k], [bx, bz] = CREEK[k + 1], l = Math.hypot(bx - ax, bz - az);
+    spots.push([lerp(ax, bx, t) - (bz - az) / l * side * 5.5, lerp(az, bz, t) + (bx - ax) / l * side * 5.5]); }
+  for (let i = 0; i < 400; i++) spots.push([8 + rng() * (AREA - 16), 8 + rng() * (AREA - 16)]);
+  for (const [x, z] of spots) {
+    if (TALL_GRASS.length >= 30) break;
+    if (x < 6 || x > AREA - 6 || z < 6 || z > AREA - 6 || keepClear(x, z, -1.6) || crowded(x, z, 1.5)) continue;
+    if (TALL_GRASS.some(([gx, gz, r]) => Math.hypot(x - gx, z - gz) < r + 9)) continue;
+    const R0 = 3.2 + rng() * 3.2, ph = rng() * 6.28, hScale = 0.9 + rng() * 0.25;
+    const pos = [], sway = [], nrm = [], idx = [];
+    const count = Math.round(Math.PI * R0 * R0 * 26);
+    for (let b = 0; b < count; b++) {
+      const a = rng() * 6.28, edge = R0 * (0.8 + 0.2 * Math.sin(a * 3 + ph) + 0.1 * Math.sin(a * 5 + ph * 2));
+      const d = Math.sqrt(rng()) * edge, px = x + Math.cos(a) * d, pz = z + Math.sin(a) * d;
+      if (keepClear(px, pz, -1.0)) continue;   // off the paths, out of buildings and the water
+      const fall = d / edge, H = (1.3 + rng() * 0.6) * hScale * (1 - fall * fall * 0.45), w = 0.07 + rng() * 0.06;
+      const th = rng() * 6.28, cx = Math.cos(th), sz = Math.sin(th), la = rng() * 6.28, lean = 0.15 + rng() * 0.35;
+      const lx = Math.cos(la) * lean, lz = Math.sin(la) * lean, y0 = heightAt(px, pz) - 0.05, o = pos.length / 3;
+      pos.push(px - cx * w, y0, pz - sz * w, px + cx * w, y0, pz + sz * w,
+        px - cx * w * 0.6 + lx * 0.3, y0 + H * 0.55, pz - sz * w * 0.6 + lz * 0.3, px + cx * w * 0.6 + lx * 0.3, y0 + H * 0.55, pz + sz * w * 0.6 + lz * 0.3,
+        px + lx, y0 + H, pz + lz);
+      const nx = -sz, nz = cx; for (let k = 0; k < 5; k++) nrm.push(nx * 0.95, 0.3, nz * 0.95);
+      sway.push(0, 0, 0.3, 0.3, 1);
+      idx.push(o, o + 1, o + 2, o + 1, o + 3, o + 2, o + 2, o + 3, o + 4);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    geo.setAttribute('aSway', new THREE.Float32BufferAttribute(sway, 1));
+    geo.setIndex(idx); geo.computeBoundingSphere();
+    const m = new THREE.Mesh(geo, mat); m.receiveShadow = true;
+    scene.add(reg(m, 'grass'));
+    TALL_GRASS.push([x, z, R0]);
+  }
+}
+
 function buildWorld() {
   const rng = mulberry32(1337);
   MAT.bark = stdMat({ map: TEX.bark });
@@ -1617,22 +1711,66 @@ function buildWorld() {
     if (!outside || (x > EXIT_ZONE.minX - 2 && x < EXIT_ZONE.maxX + 2 && z > AREA - 6) || tooClose(x, z, 3.2)) continue;
     plant(x, z, false);
   }
-  // Rocks and fallen logs (solid), bushes (cover, not solid)
-  for (let i = 0, n = 0; i < 600 && n < 42; i++) {
+  // Rocks, boulders, fallen logs, stumps and brush piles (solid), bushes (cover, not solid)
+  const solid = []; // obstacles placed so far, so they don't pile into each other
+  const crowded = (x, z, md) => tooClose(x, z, md) || solid.some(([ox, oz, or]) => Math.hypot(ox - x, oz - z) < md + or);
+  for (let i = 0, n = 0; i < 900 && n < 64; i++) {
     const x = 6 + rng() * (AREA - 12), z = 6 + rng() * (AREA - 12);
-    if (keepClear(x, z) || tooClose(x, z, 2.5)) continue;
+    if (keepClear(x, z) || crowded(x, z, 2.5)) continue;
     const r = 0.5 + rng() * 1.1, geo = new THREE.DodecahedronGeometry(r, 0);
     geo.scale(1, 0.55 + rng() * 0.35, 1); geo.rotateY(rng() * 6); geo.translate(x, heightAt(x, z) + r * 0.25, z);
-    addToChunk('rock', geo, x, z); addCircle(x, z, r * 0.95, 'rock'); n++;
+    addToChunk('rock', geo, x, z); addCircle(x, z, r * 0.95, 'rock'); solid.push([x, z, r]); n++;
   }
-  for (let i = 0, n = 0; i < 600 && n < 20; i++) {
+  // Boulders: big enough to stand behind (1.6-2.6 m tall), sometimes with a smaller one leaning on them
+  for (let i = 0, n = 0; i < 900 && n < 16; i++) {
+    const x = 8 + rng() * (AREA - 16), z = 8 + rng() * (AREA - 16);
+    if (keepClear(x, z, 1) || crowded(x, z, 4)) continue;
+    const r = 1.3 + rng() * 0.8, geo = new THREE.DodecahedronGeometry(r, 1);
+    const p = geo.attributes.position;
+    for (let k = 0; k < p.count; k++) { const f = 0.85 + rng() * 0.3; p.setXYZ(k, p.getX(k) * f, p.getY(k) * f, p.getZ(k) * f); }
+    geo.computeVertexNormals();
+    geo.scale(1, 0.8 + rng() * 0.35, 0.8 + rng() * 0.3); geo.rotateY(rng() * 6); geo.translate(x, heightAt(x, z) + r * 0.45, z);
+    addToChunk('rock', geo, x, z); addCircle(x, z, r * 0.92, 'rock');
+    if (rng() < 0.6) {
+      const a = rng() * 6.28, r2 = 0.55 + rng() * 0.4, sx = x + Math.cos(a) * (r + r2 * 0.4), sz = z + Math.sin(a) * (r + r2 * 0.4);
+      if (!keepClear(sx, sz)) {
+        const g2 = new THREE.DodecahedronGeometry(r2, 0); g2.scale(1, 0.7, 1); g2.rotateY(rng() * 6); g2.translate(sx, heightAt(sx, sz) + r2 * 0.3, sz);
+        addToChunk('rock', g2, sx, sz); addCircle(sx, sz, r2 * 0.9, 'rock');
+      }
+    }
+    solid.push([x, z, r + 1]); n++;
+  }
+  for (let i = 0, n = 0; i < 900 && n < 32; i++) {
     const x = 6 + rng() * (AREA - 12), z = 6 + rng() * (AREA - 12), a = rng() * Math.PI, len = 4 + rng() * 4;
     const ex = Math.cos(a) * len / 2, ez = Math.sin(a) * len / 2;
-    if (keepClear(x, z) || keepClear(x + ex, z + ez) || keepClear(x - ex, z - ez) || tooClose(x, z, 3)) continue;
+    if (keepClear(x, z) || keepClear(x + ex, z + ez) || keepClear(x - ex, z - ez) || crowded(x, z, 3)) continue;
     const geo = new THREE.CylinderGeometry(0.3, 0.38, len, 8); geo.rotateZ(Math.PI / 2); geo.rotateZ(Math.atan2(heightAt(x + ex, z + ez) - heightAt(x - ex, z - ez), len)); geo.rotateY(-a); geo.translate(x, heightAt(x, z) + 0.28, z);
     addToChunk('bark', geo, x, z);
     for (const t of [-0.4, 0, 0.4]) addCircle(x + Math.cos(a) * len * t, z + Math.sin(a) * len * t, 0.42, 'log');
-    n++;
+    solid.push([x, z, len / 2]); n++;
+  }
+  // Stumps of felled trees
+  for (let i = 0, n = 0; i < 900 && n < 40; i++) {
+    const x = 5 + rng() * (AREA - 10), z = 5 + rng() * (AREA - 10);
+    if (keepClear(x, z) || crowded(x, z, 2)) continue;
+    const r = 0.28 + rng() * 0.22, h = 0.35 + rng() * 0.5, geo = new THREE.CylinderGeometry(r * 0.9, r * 1.15, h, 9);
+    geo.translate(x, heightAt(x, z) + h / 2 - 0.05, z);
+    addToChunk('bark', geo, x, z); addCircle(x, z, r + 0.05, 'stump'); solid.push([x, z, r]); n++;
+  }
+  // Brush piles: heaps of dead branches about chest high
+  for (let i = 0, n = 0; i < 900 && n < 18; i++) {
+    const x = 6 + rng() * (AREA - 12), z = 6 + rng() * (AREA - 12);
+    if (keepClear(x, z, 0.5) || crowded(x, z, 3.5)) continue;
+    const R0 = 1.1 + rng() * 0.6, y0 = heightAt(x, z);
+    for (let k = 0; k < 16; k++) {
+      const len = 1.4 + rng() * 1.6, b = new THREE.CylinderGeometry(0.03 + rng() * 0.03, 0.06 + rng() * 0.04, len, 5);
+      const t = rng(), ox = (rng() - 0.5) * R0 * 1.1, oz = (rng() - 0.5) * R0 * 1.1;
+      b.rotateZ(Math.PI / 2 - 0.25 - rng() * 0.6); b.rotateY(rng() * 6.28); b.translate(x + ox, y0 + 0.15 + t * (1.1 - Math.hypot(ox, oz) / R0 * 0.6), z + oz);
+      addToChunk('bark', b, x, z);
+    }
+    const core = new THREE.IcosahedronGeometry(R0 * 0.75, 0); core.scale(1, 0.75, 1); core.translate(x, y0 + 0.35, z);
+    addToChunk('bush', core, x, z);
+    addCircle(x, z, R0 * 0.8, 'brush'); solid.push([x, z, R0]); n++;
   }
   for (let i = 0, n = 0; i < 2000 && n < 160; i++) {
     const x = 4 + rng() * (AREA - 8), z = 4 + rng() * (AREA - 8);
@@ -1647,6 +1785,7 @@ function buildWorld() {
     n++;
   }
   flushChunks();
+  buildTallGrass(rng, crowded);
 
   // Night sky: stars and a hazy moon (survivor view only)
   const starPos = [];
@@ -4502,4 +4641,4 @@ function animate() {
 animate();
 
 // Debug handle for the console
-window.BLINDSIGHT = { CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, camera, viewBody, LOCKERS, nearLocker, ENV, heardNoise, ambientMask, hostUpdate, hostAttack, DEBUG, KILL, heightAt, POLES, world, pipe, checkPipeSolved, MAT, monsterPost, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
+window.BLINDSIGHT = { TALL_GRASS, inTallGrass, CFG, game, me, players, hs, net, setViewMode, addRipple, ASSETS, THREE, renderer, scene, camera, viewBody, LOCKERS, nearLocker, ENV, heardNoise, ambientMask, hostUpdate, hostAttack, DEBUG, KILL, heightAt, POLES, world, pipe, checkPipeSolved, MAT, monsterPost, step: (dt) => { time += dt; hostUpdate(dt); }, nav: { bfsPath, tileOf, tileCenter, navOpen, genApproach, navBlocked, NAV_W } };
