@@ -79,7 +79,7 @@ Both roles see their own hands:
 | | Survivors | Monster |
 |---|---|---|
 | Goal | Restore 4 of the 5 generators (**E** opens a generator's pipe puzzle) to open the exit gate, then escape. Or stay alive until the 5:30 timer runs out. | Catch every survivor (2 hits each). |
-| Sees | A moonlit forest, plus a flashlight (**F**). | Echo vision: a dim green grid of light cast from its own eyes. Everything looks the same until sound gives it shape, and survivors caught by a sound flare orange. |
+| Sees | A moonlit forest, plus a flashlight (**F**). | Echo vision: a dim green grid of light cast from its own eyes. Everything looks the same until sound gives it shape, and its ripples trace survivors it passes over. |
 | Movement | **WASD** / arrows. **C** crouch (quiet), **Shift** sprint (loud, uses stamina). | **WASD** / arrows. **Shift** charge (on all fours). |
 | Abilities | Working a generator hums, and each restored circuit clangs. | **LMB** or **Space** strike (also rips a circuit out of a half-wired generator). **Q** / **RMB** sonar shriek (lights up every unhidden survivor within 42 m; survivors hear it). |
 
@@ -116,7 +116,7 @@ A fenced, 120 m square of night forest:
 
 **Camouflage:**
 - **Monster:** standing still makes it drop into a listening crouch and fade out completely for survivors, shadow included. The monster's HUD shows when it is hidden.
-- **Survivors:** in monster vision, a still, silent survivor is drawn exactly like everything else, in the same dim grid with no outline or highlight. They're just more surface. When sound passes over them (their own noise, the monster's footsteps, or its sonar shriek, a 42 m wave that lights up everyone it finds), they flare as a solid orange figure with a hot outline that throbs like a pulse. They keep glowing for a second or two, then break up into static. The louder the sound, the brighter and longer they glow: a crouched step leaves only a faint ember.
+- **Survivors:** in monster vision, a still, silent survivor is drawn exactly like everything else, in the same dim grid with no outline or highlight. They're just more surface. When sound passes over them (their own noise, the monster's footsteps, or its sonar shriek, a 42 m wave that lights up everyone it finds), its ripple rings wrap around their body in the same green as everything else, tracing their shape for a moment before fading. There's no glow or outline. The louder the sound, the brighter the rings, so a crouched step leaves only faint ones.
 
 **Kills:** the monster rears up and slams its claws down, and the survivor falls backward. A survivor who is taken sees it in first person: they're turned to face the monster, then collapse to the floor. The match result waits until the final kill has played out.
 
@@ -154,7 +154,7 @@ Caught or escaped survivors become free-flying spectators and can press **V** to
   - **Wavefront:** a razor-thin, white-hot edge that glitters as it passes, with a broader band behind it. The loudest sounds bleach toward white.
   - **Resonance:** a surface keeps ringing after the front passes and fades over `uHold` seconds. This is worked out in the shader from the time since the front went by, so it needs no extra buffers.
   - **Shape while ringing:** contour rings of equal distance from the sound drift slowly outward, bending over whatever they land on. Surfaces that face the sound echo harder than ones turned away, so trunks, walls and slopes read as solid shapes.
-- **Bodies ring longer and in their own colour.** Survivors (and the monster, for spectators) use the `entity` sonar material. Silent, it's identical to the world. Sound makes it ring about twice as long as the ground, as a solid orange fill with a fresnel outline and a pulse-like throb. As the echo dies, it dissolves into static instead of dimming evenly. Its glow rises with the square of loudness, so faint sounds stay faint.
+- **Ripples show more on bodies.** Survivors (and the monster, for spectators) use the `entity` sonar material: same colour, grid and brightness as the world, so a silent body is just more surface. The only difference is how a passing sound draws on them: its contour rings are about 3× tighter (`uRingScale`), brighter (`uRingGain`) and even all the way round (`uRingFace` = 0), and they ring a little longer (`uHold` 0.8 s). Without this, a survivor's own step crossed their body in about two frames and never showed on them.
 - The monster's client creates ripples from each survivor's synced **noise** level. Crouching gives small, rare ripples (~4 m), walking gives medium ones, and sprinting gives large, frequent ones (~13 m). Repairs, hits, generators and the gate opening send out big pulses.
 - The monster view is finished with UnrealBloom and a custom CRT pass: scanlines, barrel distortion, chromatic split, a slow radar sweep line, a shockwave ring that races out when it shrieks, the picture tearing when its strike lands, dark veins at the rim of its vision that swell with its heartbeat (which races when it charges), and the edges smearing back while it gallops.
 - **Sound compass:** a faint ring around the monster's view shows an arc in the direction of every sound it hears, brighter and thicker for louder sounds and wider for nearer ones, so it can turn toward a noise behind it.

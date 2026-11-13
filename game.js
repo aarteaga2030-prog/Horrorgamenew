@@ -370,9 +370,10 @@ const SONAR_VERT = /* glsl */ `
 //  - while it rings, it shows contour rings around the source (lines of equal distance,
 //    which bend over the shape of whatever they land on), and surfaces that face the
 //    sound echo harder than ones turned away, so ridges, trunks and walls read as solid.
-// Bodies (uBody = 1) ring far longer and in their own warm colour: a struck survivor
-// flares as a solid glowing figure with a bright outline that throbs like a pulse, then
-// breaks up into static as the echo dies. A silent body is still just more grid.
+// Bodies get no glow, outline or colour of their own. A passing sound just draws its
+// ripple rings over them tighter and brighter (uRingScale, uRingGain) and holds them a
+// little longer, so the rings visibly wrap around a figure instead of crossing it in a
+// couple of frames. A silent body is still just more grid.
 const SONAR_FRAG = /* glsl */ `
   uniform float uTime;
   uniform vec3 uCamPos;
@@ -383,9 +384,10 @@ const SONAR_FRAG = /* glsl */ `
   uniform float uGrid;      // grid spacing in degrees of view angle
   uniform float uNearGain;  // faint "touch" sense right around the monster
   uniform float uHold;      // seconds a surface keeps ringing after a wavefront passes
-  uniform float uBody;      // 1 = a body: solid glow, outline, pulse, breaks up as it fades
+  uniform float uRingScale; // contour ring spacing multiplier (bodies use tighter rings)
+  uniform float uRingGain;  // contour ring brightness
+  uniform float uRingFace;  // 1 = rings dim on surfaces turned away from the sound; 0 = even
   uniform vec3 uColor;
-  uniform vec3 uHotColor;   // colour of a ringing body
   varying vec3 vWorld;
   varying vec3 vNormalW;
 
@@ -408,7 +410,7 @@ const SONAR_FRAG = /* glsl */ `
     if (!gl_FrontFacing) N = -N;
     float dpx = length(fwidth(vWorld));            // world metres per pixel here (derivatives stay outside the loop)
 
-    float energy = 0.0, hot = 0.0, ring = 0.0, contour = 0.0;
+    float energy = 0.0, hot = 0.0, contour = 0.0;
     for (int i = 0; i < MAXR; i++) {
       vec4 r = uRip[i];
       vec3 p = uRipP[i];
@@ -430,15 +432,14 @@ const SONAR_FRAG = /* glsl */ `
       // resonance left behind it
       float mem = exp(-tp / uHold) * smoothstep(0.4, -0.2, x);
       // contour rings of equal distance from the sound, drifting slowly outward
-      float cs = 0.8 + d * 0.025;
+      float cs = (0.8 + d * 0.025) * uRingScale;
       float cv = (d - age * 0.9) / cs;
       float cl = 1.0 - smoothstep(0.0, 1.4, abs(fract(cv - 0.5) - 0.5) * cs / max(dpx, 1e-4));
       // surfaces turned toward the sound echo harder
       float face = 0.3 + 0.7 * max(dot(N, normalize(r.xyz - vWorld)), 0.0);
       energy += (front * 0.85 + mem * 0.09) * fade * mix(1.0, face, 0.7);
-      contour += cl * mem * fade * face;
+      contour += cl * mem * fade * mix(1.0, face, uRingFace);
       hot += edge * fade;
-      ring += (mem + front * 0.6) * fade;
     }
     // glitter where the wavefront passes
     float spark = step(0.9, hash3(floor(vWorld * 7.0) + floor(uTime * 14.0)));
@@ -447,30 +448,18 @@ const SONAR_FRAG = /* glsl */ `
     float I = uBase + energy * uGain + near;
     float H = min(hot * uGain, 3.0);
     vec3 white = mix(uColor, vec3(0.78, 1.0, 0.96), 0.75);
-    vec3 col = uColor * (lines * I * 1.8 + I * 0.05) + uColor * min(contour * uGain, 1.5) * 0.6
+    vec3 col = uColor * (lines * I * 1.8 + I * 0.05) + uColor * min(contour * uGain, 1.5) * uRingGain
              + white * H * (0.22 + lines * 1.2);
     col = mix(col, vec3(dot(col, vec3(0.33))) * vec3(0.82, 1.0, 1.0), clamp(I - 1.1, 0.0, 0.5)); // the loudest sounds bleach toward white
-    if (uBody > 0.5) {
-      // A ringing body: a solid warm figure with a hot outline, throbbing like a pulse.
-      float g = min(ring * uGain, 2.2);
-      g = g * g / (g + 0.5);                        // faint sounds (a crouched step) leave only an ember
-      float rim = pow(1.0 - abs(dot(N, normalize(toCam))), 2.2);
-      float beat = 0.82 + 0.18 * pow(0.5 + 0.5 * sin(uTime * 8.0), 6.0);
-      // as the echo dies the figure breaks up into static instead of dimming evenly
-      float grain = hash3(floor(vWorld * 22.0) + floor(uTime * 18.0) * 0.37);
-      float keep = smoothstep(grain - 0.15, grain + 0.15, g * 2.4);
-      col += uHotColor * (0.6 + rim * 2.4 + lines * 0.4) * g * beat * keep;
-      col += white * rim * min(hot * uGain, 2.0) * 0.8;
-    }
     gl_FragColor = vec4(col, 1.0);
   }`;
-function makeSonarMaterial({ base, gain, grid, near, color, hold = 0.55, body = 0, hot = 0xff9a3c }) {
+function makeSonarMaterial({ base, gain, grid, near, color, hold = 0.55, ringScale = 1, ringGain = 0.6, ringFace = 1 }) {
   return new THREE.ShaderMaterial({
     defines: { MAXR: CFG.MAX_RIPPLES },
     uniforms: Object.assign({}, sonarShared, {
       uBase: { value: base }, uGain: { value: gain }, uGrid: { value: grid },
       uNearGain: { value: near }, uColor: { value: new THREE.Color(color) },
-      uHold: { value: hold }, uBody: { value: body }, uHotColor: { value: new THREE.Color(hot) },
+      uHold: { value: hold }, uRingScale: { value: ringScale }, uRingGain: { value: ringGain }, uRingFace: { value: ringFace },
     }),
     vertexShader: SONAR_VERT,
     fragmentShader: SONAR_FRAG,
@@ -479,9 +468,10 @@ function makeSonarMaterial({ base, gain, grid, near, color, hold = 0.55, body = 
 const SONAR_MATS = {
   env: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0, color: 0x2bff7a }),
   gen: makeSonarMaterial({ base: 0.2, gain: 1.0, grid: 1.6, near: 0, color: 0xb4ff3b }),   // objectives faintly visible
-  // Bodies: the same faint grid in silence (no outline, no tell), but any sound that reaches
-  // them makes them ring for ~2 s, far longer and brighter than the ground around them.
-  entity: makeSonarMaterial({ base: 0.035, gain: 1.9, grid: 1.6, near: 0, color: 0x2bff7a, hold: 1.1, body: 1 }),
+  // Bodies: the same faint grid and colour as the world, with no glow or outline. A sound
+  // passing over them draws its ripple rings tighter, brighter and evenly all the way round,
+  // and holds them a little longer, so the rings visibly wrap around a figure.
+  entity: makeSonarMaterial({ base: 0.035, gain: 1.0, grid: 1.6, near: 0, color: 0x2bff7a, hold: 0.8, ringScale: 0.35, ringGain: 1.8, ringFace: 0 }),
 };
 // A shell around the world, seen only in monster vision, carries the same grid past the
 // treetops so nothing stands out as a silhouette against an empty sky.
